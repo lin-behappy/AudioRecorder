@@ -482,7 +482,7 @@ class AudioRecordingService : Service() {
                 if (availableTimeSeconds < AppConstants.MIN_REMAIN_RECORDING_TIME) {
                     //There is running out space on the device.
                     //Stop recording before it completely run out.
-                    audioRecorder.stopRecording()
+                    stopRecording()
                 }
             }
         }
@@ -780,7 +780,7 @@ class AudioRecordingService : Service() {
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 Timber.d("MediaProjection stopped by the system or the user")
-                if (audioRecorder.isRecording) audioRecorder.stopRecording()
+                if (audioRecorder.isRecording) stopRecording()
             }
         }
         projection.registerCallback(callback, mainHandler)
@@ -828,7 +828,7 @@ class AudioRecordingService : Service() {
     }
 
     private fun handleStopAction() {
-        audioRecorder.stopRecording()
+        stopRecording()
     }
 
     fun pauseRecording() {
@@ -844,7 +844,62 @@ class AudioRecordingService : Service() {
     }
 
     fun stopRecording() {
-        audioRecorder.stopRecording()
+        val rec = audioRecorder
+        if (rec is WavRecorderV2 && rec.isTaking()) {
+            serviceScope.launch {
+                rec.stopTakeAndSplice()
+                rec.stopRecording()
+            }
+        } else {
+            rec.stopRecording()
+        }
+    }
+
+    fun discardTakeAndStop() {
+        val rec = audioRecorder
+        if (rec is WavRecorderV2 && rec.isTaking()) {
+            serviceScope.launch {
+                rec.abortTake()
+                rec.stopRecording()
+            }
+        } else {
+            rec.stopRecording()
+        }
+    }
+
+    fun punchIn(anchorMs: Long): Long {
+        val st = _recordingState.value
+        Timber.d("punch punchIn anchor=%d format=%s", anchorMs, st.recordingFormat)
+        if (!st.isRecording()) return -1L
+        if (st.recordingFormat != RecordingFormat.Wav) return -2L
+        val rec = audioRecorder
+        if (rec !is WavRecorderV2 || rec.isTaking()) return -1L
+        val dur = st.durationMills
+        if (dur <= 0) return -1L
+        val anchor = anchorMs.coerceIn(0L, dur)
+        if (!st.isPaused()) {
+            rec.pauseRecording()
+        }
+        val takeFile = File(cacheDir, "punch-take-${System.currentTimeMillis()}.wav")
+        if (!rec.startTake(takeFile, anchor)) return -1L
+        val interval = AppConstants.RECORDING_VISUALIZATION_INTERVAL_NEW.toLong()
+        val anchorSamples = (anchor / interval).toInt()
+        val drop = totalRecordingSampleCount - anchorSamples
+        if (drop > 0) {
+            repeat(drop) { if (recordingAmplitudes.isNotEmpty()) recordingAmplitudes.removeLast() }
+        }
+        totalRecordingSampleCount = anchorSamples
+        recordingFullDataBuffer.truncateToSamples(anchorSamples)
+        val amps = recordingAmplitudes.toIntArray()
+        _recordingState.value = _recordingState.value.copy(
+            durationMills = anchor,
+            amplitudes = amps,
+            totalSampleCount = anchorSamples,
+            waveformDataOffset = (anchorSamples - amps.size).coerceAtLeast(0),
+            widthScale = anchor * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD),
+        )
+        updateNotification()
+        return anchor
     }
 
     private suspend fun handleRecordingStopped(isNotMaxDurationHandling: Boolean = true) {

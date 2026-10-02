@@ -27,6 +27,8 @@
     <string name="msg_move_to_trash_failed">移动录音到回收站失败</string>
     <string name="msg_multiple_move_to_trash_failed">移动录音到回收站失败。</string>
     <string name="msg_recording_canceled">已取消的录音已移到回收站</string>
+    <string name="msg_punch_seek_wav_only">从指定位置重新录制需要 WAV 格式（设置 → 格式 → WAV）</string>
+    <string name="msg_punch_ready">已回到 %1$s，继续录制将从此处覆盖</string>
     <string name="msg_recording_restored">录音 \'%1$s\' 已恢复</string>
     <string name="msg_record_renamed">录音已重命名为 \'%1$s\'</string>
     <string name="msg_recording_saved_with_name">录音已保存，名称：%s</string>
@@ -322,6 +324,8 @@
 
     <string name="button_record">录音</string>
     <string name="button_stop">停止</string>
+    <string name="button_rerecord">重新录制</string>
+    <string name="button_discard">舍弃</string>
     <string name="button_pause">暂停</string>
     <string name="button_resume">继续</string>
     <string name="button_finish">完成</string>

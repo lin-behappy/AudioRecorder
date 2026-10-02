@@ -107,6 +107,16 @@ class RecordingWaveformBuffer(private val targetSize: Int) {
         pendingCount = 0
     }
 
+    @Synchronized
+    fun truncateToSamples(keep: Int) {
+        if (keep < 0) return
+        val total = slotCount * samplesPerSlot + pendingCount
+        if (keep >= total) return
+        slotCount = (keep / samplesPerSlot).coerceIn(0, slotCount)
+        pendingSum = 0
+        pendingCount = 0
+    }
+
     /**
      * Produces an [IntArray] covering the whole recorded timeline, at most [targetSize] elements.
      *

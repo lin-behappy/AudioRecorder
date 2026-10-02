@@ -360,14 +360,25 @@ internal fun HomeScreen(
                         .height(waveformHeight),
                     state = uiState.waveformState,
                     showTimeline = true,
+                    punchPickEnabled = true,
                     onSeekStart = {
-                        onAction(HomeScreenAction.OnSeekStart)
+                        if (!uiState.isRecording()) {
+                            onAction(HomeScreenAction.OnSeekStart)
+                        }
                     },
                     onSeekProgress = { mills ->
-                        onAction(HomeScreenAction.OnSeekProgress(mills))
+                        if (uiState.isRecording()) {
+                            onAction(HomeScreenAction.OnRecordingSeekPreview(mills))
+                        } else {
+                            onAction(HomeScreenAction.OnSeekProgress(mills))
+                        }
                     },
                     onSeekEnd = { mills ->
-                        onAction(HomeScreenAction.OnSeekEnd(mills))
+                        if (uiState.isRecording()) {
+                            onAction(HomeScreenAction.OnRecordingSeekCommit(mills))
+                        } else {
+                            onAction(HomeScreenAction.OnSeekEnd(mills))
+                        }
                     }
                 )
                 if (!uiState.isRecording()) {
@@ -402,6 +413,13 @@ internal fun HomeScreen(
         }
     }
     val timePanel: @Composable () -> Unit = {
+        val recording = uiState.isRecording()
+        val recDur = uiState.waveformState.durationMills
+        val recProgress = if (recording && recDur > 0) {
+            ((uiState.punchPointMs ?: recDur).toFloat() / recDur.toFloat()).coerceIn(0f, 1f)
+        } else {
+            uiState.progress
+        }
         TimePanel(
             uiState.recordName,
             uiState.recordDescription,
@@ -409,25 +427,62 @@ internal fun HomeScreen(
             uiState.time,
             uiState.startTime,
             uiState.endTime,
-            uiState.progress,
-            !uiState.isRecording() && uiState.isShowWaveform,
-            !uiState.isRecording() && uiState.isShowWaveform,
+            recProgress,
+            (!recording && uiState.isShowWaveform) || (recording && recDur > 0),
+            !recording && uiState.isShowWaveform,
             onRenameClick = { showRenameDialog.value = true },
             onDescriptionClick = { onAction(HomeScreenAction.ShowDescriptionDialog) },
-            onProgressChange = { onAction(HomeScreenAction.OnProgressBarStateChange(it)) }
+            onProgressChange = {
+                if (recording && recDur > 0) {
+                    onAction(HomeScreenAction.OnRecordingSeekPreview((it * recDur).toLong()))
+                } else {
+                    onAction(HomeScreenAction.OnProgressBarStateChange(it))
+                }
+            },
+            punchHint = if (uiState.punchPointMs != null) {
+                stringResource(
+                    R.string.msg_punch_ready,
+                    TimeUtils.formatTimeIntervalHourMinSec2(uiState.punchPointMs ?: 0L),
+                )
+            } else "",
+            isRecordingSlider = recording,
+            onProgressFinished = {
+                if (recording && recDur > 0) {
+                    onAction(HomeScreenAction.OnRecordingSeekCommit((it * recDur).toLong()))
+                }
+            },
+            showSlider = !recording,
         )
     }
     val bottomBar: @Composable () -> Unit = {
+        val dur = uiState.waveformState.durationMills
+        val anchor = uiState.punchPointMs
+        val rerecordLabel = if (anchor != null && dur > 0 && anchor < dur - 200) {
+            stringResource(R.string.button_rerecord)
+        } else {
+            stringResource(R.string.button_resume)
+        }
         BottomBar(
             onSettingsClick = { showSettingsScreen() },
             onRecordsListClick = { showRecordsScreen() },
             onStartRecordingClick = handleRecordButtonClick,
-            onPauseRecordingClick = { onAction(HomeScreenAction.OnPauseRecordingClick) },
-            onResumeRecordingClick = { onAction(HomeScreenAction.OnResumeRecordingClick) },
+            rerecordLabel = rerecordLabel,
+            onRerecordClick = { onAction(HomeScreenAction.OnRerecordClick) },
             onStopRecordingClick = { onAction(HomeScreenAction.OnStopRecordingClick) },
             onDeleteRecordingClick = { onAction(HomeScreenAction.OnDeleteRecordingProgressClick) },
             bottomBarState = uiState.bottomBarState
         )
+    }
+    val transportRow: @Composable () -> Unit = {
+        if (uiState.isRecording()) {
+            TransportRow(
+                modifier = Modifier.padding(vertical = 4.dp),
+                auditionPlaying = uiState.auditionPlaying,
+                onJumpStartClick = { onAction(HomeScreenAction.OnTransportJumpStart) },
+                onAuditionClick = { onAction(HomeScreenAction.OnTransportAudition) },
+                onJumpEndClick = { onAction(HomeScreenAction.OnTransportJumpEnd) },
+            )
+        }
     }
 
     Scaffold(
@@ -481,6 +536,7 @@ internal fun HomeScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             waveformPanel(if (windowLayout.isCompactHeight) 160.dp else 200.dp)
+                            transportRow()
                         }
                         Column(
                             modifier = Modifier
@@ -520,6 +576,7 @@ internal fun HomeScreen(
                         )
                         // ...but let the waveform span the full screen width.
                         waveformPanel(200.dp)
+                        transportRow()
                         Spacer(
                             modifier = Modifier
                                 .weight(1f)

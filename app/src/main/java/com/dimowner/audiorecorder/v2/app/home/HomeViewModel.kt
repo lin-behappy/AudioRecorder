@@ -23,6 +23,7 @@ import android.app.Activity
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
+import android.media.MediaPlayer
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
@@ -64,6 +65,7 @@ import com.dimowner.audiorecorder.v2.app.toInfoCombinedText
 import com.dimowner.audiorecorder.v2.audio.AudioRecordingService
 import com.dimowner.audiorecorder.v2.audio.AudioRecordingServiceEvent
 import com.dimowner.audiorecorder.v2.audio.NotEnoughSpaceException
+import com.dimowner.audiorecorder.v2.audio.createWavHeader
 import com.dimowner.audiorecorder.v2.audio.isOutOfSpace
 import com.dimowner.audiorecorder.v2.audio.RecordingServiceState
 import com.dimowner.audiorecorder.v2.audio.RecordingState
@@ -90,6 +92,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
 import javax.inject.Inject
 
@@ -177,6 +181,9 @@ class HomeViewModel @Inject constructor(
 
     private var recordingService: AudioRecordingService? = null
     private var isRecordingServiceBound = false
+
+    private var auditionPlayer: MediaPlayer? = null
+    private var auditionFile: File? = null
 
     private val recordingServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -317,7 +324,9 @@ class HomeViewModel @Inject constructor(
                             TimeUtils.formatTimeIntervalHourMinSec2(recState.durationMills)
                         else _state.value.time,
                         isShowWaveform = recState.durationMills > 0 || _state.value.isShowWaveform,
-                        waveformState = pausedWaveformState,
+                        waveformState = pausedWaveformState.copy(
+                            punchAnchorMs = _state.value.punchPointMs,
+                        ),
                     )
                 } else if (recState.isRecording()) {
                     // STARTED/RESUMED are overwritten by PROGRESS on the first progress tick
@@ -334,6 +343,7 @@ class HomeViewModel @Inject constructor(
                         isStarted -> {
                             // Recording just started – initialise UI
                             lastProgressUpdate = 0L
+                            releaseAudition()
                             _state.value = state.value.copy(
                                 bottomBarState = BottomBarState.RECORDING,
                                 waveformState = WaveformState(isRecording = true),
@@ -343,6 +353,7 @@ class HomeViewModel @Inject constructor(
                                 recordName = context.getString(R.string.recording_progress),
                                 recordDescription = "",
                                 keepScreenOn = prefs.isKeepScreenOn,
+                                punchPointMs = null,
                             )
                             withContext(ioDispatcher) {
                                 recordsDataSource.getRecord(prefs.recordedRecordId)?.let {
@@ -354,10 +365,12 @@ class HomeViewModel @Inject constructor(
                         }
                         isResumed -> {
                             // Recording resumed from pause – update BottomBar state without resetting waveform
+                            releaseAudition()
                             _state.value = _state.value.copy(
                                 bottomBarState = BottomBarState.RECORDING,
                                 recordName = context.getString(R.string.recording_progress),
                                 keepScreenOn = prefs.isKeepScreenOn,
+                                punchPointMs = null,
                             )
                         }
                         else -> {
@@ -379,10 +392,10 @@ class HomeViewModel @Inject constructor(
                                 durationSample = recState.totalSampleCount,
                                 durationMills = recState.durationMills,
                                 progressMills = recState.durationMills,
-                                widthScale = recState.widthScale,
                                 gridStepMills = RECORDING_GRID_STEP,
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
+                                punchAnchorMs = _state.value.punchPointMs,
                             )
                         )
                     }
@@ -1194,10 +1207,223 @@ class HomeViewModel @Inject constructor(
     }
 
     fun handleResumeRecordingClick() {
-        recordingService?.resumeRecording()
+        val svc = recordingService
+        if (svc == null) return
+        if (!_state.value.isRecording()) return
+        val dur = _state.value.waveformState.durationMills
+        val anchor = _state.value.punchPointMs
+        if (anchor != null && dur > 0 && anchor < dur - 200) {
+            when (svc.punchIn(anchor)) {
+                -2L -> {
+                    _state.value = _state.value.copy(punchPointMs = null)
+                    showInfoMessage(R.string.msg_punch_seek_wav_only)
+                    svc.resumeRecording()
+                }
+                -1L -> {
+                    _state.value = _state.value.copy(punchPointMs = null)
+                    svc.resumeRecording()
+                }
+                else -> Unit
+            }
+            return
+        }
+        _state.value = _state.value.copy(punchPointMs = null)
+        svc.resumeRecording()
+    }
+
+    fun handleRecordingSeekPreview(mills: Long) {
+        Timber.d("punch preview mills=%d recording=%b", mills, _state.value.isRecording())
+        if (!_state.value.isRecording()) return
+        if (_state.value.bottomBarState == BottomBarState.RECORDING) {
+            recordingService?.pauseRecording()
+        }
+        val dur = _state.value.waveformState.durationMills
+        if (dur <= 0) return
+        val pos = mills.coerceIn(0L, dur)
+        _state.value = _state.value.copy(
+            time = TimeUtils.formatTimeIntervalHourMinSec2(pos),
+            progress = millsToProgress(pos, dur),
+            punchPointMs = pos,
+            waveformState = _state.value.waveformState.copy(punchAnchorMs = pos),
+        )
+    }
+
+    fun handleRecordingSeekCommit(mills: Long) {
+        Timber.d("punch commit mills=%d recording=%b", mills, _state.value.isRecording())
+        if (!_state.value.isRecording()) return
+        val dur = _state.value.waveformState.durationMills
+        if (dur <= 0) return
+        val pos = mills.coerceIn(0L, dur)
+        _state.value = _state.value.copy(
+            time = TimeUtils.formatTimeIntervalHourMinSec2(pos),
+            progress = millsToProgress(pos, dur),
+            punchPointMs = pos,
+            waveformState = _state.value.waveformState.copy(punchAnchorMs = pos),
+        )
+    }
+    fun handleRerecordClick() {
+        Timber.d("punch rerecord click recording=%b", _state.value.isRecording())
+        val svc = recordingService ?: return
+        if (!_state.value.isRecording()) return
+        releaseAudition()
+        val dur = _state.value.waveformState.durationMills
+        if (dur <= 0) return
+        val anchor = _state.value.punchPointMs
+        if (anchor == null || anchor >= dur - 200) {
+            if (_state.value.bottomBarState == BottomBarState.PAUSED) {
+                svc.resumeRecording()
+            } else {
+                svc.pauseRecording()
+            }
+            _state.value = _state.value.copy(punchPointMs = null)
+            return
+        }
+        when (svc.punchIn(anchor)) {
+            -2L -> {
+                _state.value = _state.value.copy(punchPointMs = null)
+                showInfoMessage(R.string.msg_punch_seek_wav_only)
+            }
+            -1L -> _state.value = _state.value.copy(punchPointMs = null)
+            else -> Unit
+        }
+    }
+
+    fun handleTransportJumpStart() {
+        if (!_state.value.isRecording()) return
+        if (_state.value.bottomBarState == BottomBarState.RECORDING) {
+            recordingService?.pauseRecording()
+        }
+        handleRecordingSeekCommit(0L)
+        auditionSeekTo(0L)
+    }
+
+    fun handleTransportJumpEnd() {
+        if (!_state.value.isRecording()) return
+        if (_state.value.bottomBarState == BottomBarState.RECORDING) {
+            recordingService?.pauseRecording()
+        }
+        val dur = _state.value.waveformState.durationMills
+        if (dur <= 0) return
+        handleRecordingSeekCommit(dur)
+        auditionSeekTo(dur)
+    }
+
+    fun handleTransportAudition() {
+        if (auditionPlayer != null) {
+            releaseAudition()
+            return
+        }
+        val svc = recordingService ?: return
+        if (!_state.value.isRecording()) return
+        if (_state.value.bottomBarState == BottomBarState.RECORDING) {
+            svc.pauseRecording()
+        }
+        val anchor = _state.value.punchPointMs
+            ?: _state.value.waveformState.durationMills
+        viewModelScope.launch(ioDispatcher) {
+            val temp = buildAuditionCopy()
+            withContext(mainDispatcher) {
+                if (temp == null) {
+                    showInfoMessage(R.string.msg_operation_failed_generic)
+                    return@withContext
+                }
+                try {
+                    val player = MediaPlayer().apply {
+                        setDataSource(temp.absolutePath)
+                        prepare()
+                        seekTo(anchor.coerceAtLeast(0L).toInt())
+                        setOnCompletionListener {
+                            viewModelScope.launch(mainDispatcher) {
+                                releaseAudition()
+                            }
+                        }
+                    }
+                    auditionFile = temp
+                    auditionPlayer = player
+                    player.start()
+                    _state.value = _state.value.copy(auditionPlaying = true)
+                } catch (e: IOException) {
+                    Timber.e(e, "audition start failed")
+                    temp.delete()
+                    showInfoMessage(R.string.msg_operation_failed_generic)
+                } catch (e: IllegalStateException) {
+                    Timber.e(e, "audition start failed")
+                    temp.delete()
+                    showInfoMessage(R.string.msg_operation_failed_generic)
+                }
+            }
+        }
+    }
+
+    private fun auditionSeekTo(mills: Long) {
+        try {
+            auditionPlayer?.seekTo(mills.coerceAtLeast(0L).toInt())
+        } catch (e: IllegalStateException) {
+            Timber.e(e, "audition seek failed")
+        }
+    }
+
+    private fun releaseAudition() {
+        try {
+            auditionPlayer?.stop()
+        } catch (e: IllegalStateException) {
+            Timber.e(e, "audition stop failed")
+        }
+        try {
+            auditionPlayer?.release()
+        } catch (e: IllegalStateException) {
+            Timber.e(e, "audition release failed")
+        }
+        auditionPlayer = null
+        try {
+            auditionFile?.delete()
+        } catch (e: SecurityException) {
+            Timber.e(e, "audition cleanup denied")
+        }
+        auditionFile = null
+        if (_state.value.auditionPlaying) {
+            _state.value = _state.value.copy(auditionPlaying = false)
+        }
+    }
+
+    private suspend fun buildAuditionCopy(): File? {
+        val context: Context = getApplication<Application>().applicationContext
+        val recordId = prefs.recordedRecordId
+        if (recordId < 0) return null
+        val record = recordsDataSource.getRecord(recordId) ?: return null
+        val src = File(record.path)
+        if (!src.isFile || src.length() <= 44) return null
+        return try {
+            val pcmLen = src.length() - 44
+            val tmp = File(context.cacheDir, "audition-${System.currentTimeMillis()}.wav")
+            FileOutputStream(tmp).use { out ->
+                out.write(
+                    createWavHeader(
+                        totalAudioLen = pcmLen,
+                        totalDataLen = pcmLen + 36,
+                        sampleRate = record.sampleRate,
+                        channels = record.channelCount,
+                        byteRate = (record.sampleRate * record.channelCount * 2).toLong(),
+                    )
+                )
+                FileInputStream(src).use { input ->
+                    input.skip(44)
+                    input.copyTo(out)
+                }
+                out.flush()
+            }
+            tmp
+        } catch (e: IOException) {
+            Timber.e(e, "audition copy failed")
+            null
+        } catch (e: SecurityException) {
+            Timber.e(e, "audition copy denied")
+            null
+        }
     }
 
     fun handleStopRecordingClick() {
+        releaseAudition()
         recordingService?.stopRecording()
         _state.value = state.value.copy(
             waveformState = _state.value.waveformState.copy(
@@ -1207,6 +1433,7 @@ class HomeViewModel @Inject constructor(
             //TODO: do not change state to READY_TO_START_RECORDING before recording stopped
             bottomBarState = BottomBarState.READY_TO_START_RECORDING,
             keepScreenOn = false,
+            punchPointMs = null,
         )
     }
 
@@ -1216,7 +1443,8 @@ class HomeViewModel @Inject constructor(
             isDeleteRecordingProgressRequested = true,
             keepScreenOn = false,
         )
-        recordingService?.stopRecording()
+        releaseAudition()
+        recordingService?.discardTakeAndStop()
     }
 
     fun handleRestoreRecordFromRecycle(recordId: Long) {
@@ -1299,6 +1527,12 @@ class HomeViewModel @Inject constructor(
             is HomeScreenAction.OnSeekProgress -> handleSeekProgress(action.mills)
             is HomeScreenAction.OnSeekEnd -> handleSeekEnd(action.mills)
             is HomeScreenAction.OnProgressBarStateChange -> handleProgressBarStateChange(action.value)
+            is HomeScreenAction.OnRecordingSeekPreview -> handleRecordingSeekPreview(action.mills)
+            is HomeScreenAction.OnRecordingSeekCommit -> handleRecordingSeekCommit(action.mills)
+            HomeScreenAction.OnRerecordClick -> handleRerecordClick()
+            HomeScreenAction.OnTransportJumpStart -> handleTransportJumpStart()
+            HomeScreenAction.OnTransportAudition -> handleTransportAudition()
+            HomeScreenAction.OnTransportJumpEnd -> handleTransportJumpEnd()
             HomeScreenAction.OnPauseClick -> handlePlaybackPauseClick()
             HomeScreenAction.OnPlayClick -> {
                 viewModelScope.launch(ioDispatcher) {
@@ -1470,6 +1704,7 @@ class HomeViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        releaseAudition()
         moveAnimator?.cancel()
         moveAnimator = null
         try {
@@ -1520,6 +1755,9 @@ data class HomeScreenState(
     val playbackSpeed: PlaybackSpeed = PlaybackSpeed.NORMAL,
     val isSeek: Boolean = false,
     val isDeleteRecordingProgressRequested: Boolean = false,
+    /** Punch-in anchor chosen by tapping/dragging the waveform while recording; resume overwrites from here. */
+    val punchPointMs: Long? = null,
+    val auditionPlaying: Boolean = false,
     // Bluetooth mic state
     val isBluetoothMicAvailable: Boolean = false,
     val isBluetoothMicEnabled: Boolean = false,
@@ -1595,6 +1833,12 @@ sealed class HomeScreenAction {
     data class OnSeekProgress(val mills: Long) : HomeScreenAction()
     data class OnSeekEnd(val mills: Long) : HomeScreenAction()
     data class OnProgressBarStateChange(val value: Float) : HomeScreenAction()
+    data class OnRecordingSeekPreview(val mills: Long) : HomeScreenAction()
+    data class OnRecordingSeekCommit(val mills: Long) : HomeScreenAction()
+    data object OnRerecordClick : HomeScreenAction()
+    data object OnTransportJumpStart : HomeScreenAction()
+    data object OnTransportAudition : HomeScreenAction()
+    data object OnTransportJumpEnd : HomeScreenAction()
     data class SetBluetoothMicEnabled(val enabled: Boolean) : HomeScreenAction()
     data class SelectBluetoothDevice(val device: BluetoothDeviceInfo?) : HomeScreenAction()
     data class SetAlwaysUseBluetoothMic(val enabled: Boolean) : HomeScreenAction()

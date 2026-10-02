@@ -69,6 +69,23 @@ class WavRecorderV2 @Inject constructor(
     @Volatile private var lastNonZeroAmplitude: Int = 0
     @Volatile private var lastEmittedDurationMills: Long = -1L
 
+    /** Guards file writes against take/splice file surgery. */
+    private val ioLock = Any()
+    private var currentMainFile: File? = null
+    private var mainOut: FileOutputStream? = null
+    @Volatile private var totalBytesWritten: Long = 0L
+    @Volatile private var bytesPerSecond: Int = 0
+    private var currentFrameSize: Int = 0
+    private var currentSampleRate: Int = 0
+    private var currentChannelCount: Int = 0
+    private var takeOut: FileOutputStream? = null
+    private var currentTakeFile: File? = null
+    @Volatile private var takeBytesWritten: Long = 0L
+    @Volatile private var takeAnchorMs: Long = 0L
+    @Volatile private var taking: Boolean = false
+
+    fun isTaking(): Boolean = taking
+
     private val _event = MutableSharedFlow<RecorderEvent>()
     override fun subscribeRecorderEvents(): Flow<RecorderEvent> {
         return _event
@@ -185,14 +202,20 @@ class WavRecorderV2 @Inject constructor(
         // Launch a coroutine to read audio data in the background
         recordingJob = coroutineScope.launch(Dispatchers.IO) {
             val buffer = ByteArray(bufferSize)
-            var fos: FileOutputStream? = null
-            var totalBytesWritten = 0L
-            val bytesPerSecond = sampleRate * channelCount * (bitsPerSample / 8)
+            currentMainFile = outputFile
+            bytesPerSecond = sampleRate * channelCount * (bitsPerSample / 8)
+            currentFrameSize = frameSize
+            currentSampleRate = sampleRate
+            currentChannelCount = channelCount
+            totalBytesWritten = 0L
             var maxDurationReached = false
             var failed = false
 
             try {
-                fos = FileOutputStream(outputFile, true) // append after the placeholder header
+                synchronized(ioLock) {
+                    mainOut?.close()
+                    mainOut = FileOutputStream(outputFile, true) // append after the placeholder header
+                }
                 while (isActive && _isRecording && currentRun === run) {
                     if (_isPaused) {
                         // Read and discard PCM data to prevent accumulating stale audio during pause
@@ -206,15 +229,26 @@ class WavRecorderV2 @Inject constructor(
                     }
                     val readResult = recorder.read(buffer, 0, readChunkSize)
                     if (readResult > 0) {
-                        fos.write(buffer, 0, readResult)
-                        totalBytesWritten += readResult
+                        synchronized(ioLock) {
+                            if (taking) {
+                                takeOut?.write(buffer, 0, readResult)
+                                takeBytesWritten += readResult
+                            } else {
+                                mainOut?.write(buffer, 0, readResult)
+                                totalBytesWritten += readResult
+                            }
+                        }
                         // A stop followed by a new start may have landed during the blocking
                         // read: keep the audio in this run's file, but leave the shared state to
                         // the new recording.
                         if (currentRun !== run) break
 
                         // Calculate duration from bytes written
-                        durationMills = (totalBytesWritten * 1000L) / bytesPerSecond
+                        durationMills = if (taking) {
+                            takeAnchorMs + (takeBytesWritten * 1000L) / bytesPerSecond
+                        } else {
+                            (totalBytesWritten * 1000L) / bytesPerSecond
+                        }
 
                         // Each read covers ~RECORDING_VISUALIZATION_INTERVAL_NEW ms, so always update amplitude
                         val amplitude = calculateAmplitude(buffer, readResult)
@@ -258,10 +292,13 @@ class WavRecorderV2 @Inject constructor(
                 Timber.e(e, "Error writing PCM data")
                 failed = true
             } finally {
-                try {
-                    fos?.close()
-                } catch (e: IOException) {
-                    Timber.e(e, "Error closing output file stream")
+                synchronized(ioLock) {
+                    try {
+                        mainOut?.close()
+                    } catch (e: IOException) {
+                        Timber.e(e, "Error closing output file stream")
+                    }
+                    mainOut = null
                 }
                 // The hardware is released here, on this background thread, and never from
                 // stopRecording(): AudioRecord.stop() is a synchronous binder call into
@@ -360,6 +397,195 @@ class WavRecorderV2 @Inject constructor(
         _isPaused = false
         synchronized(amplitudesBuffer) { amplitudesBuffer.clear() }
         return true
+    }
+
+    fun startTake(takeFile: File, anchorMs: Long): Boolean {
+        Timber.d("punch startTake paused=%b recording=%b taking=%b", _isPaused, _isRecording, taking)
+        if (!_isRecording || !_isPaused || taking) return false
+        if (bytesPerSecond <= 0) return false
+        try {
+            FileOutputStream(takeFile).use { it.write(ByteArray(44)) }
+        } catch (e: IOException) {
+            Timber.e(e, "startTake: cannot create take file")
+            return false
+        }
+        synchronized(ioLock) {
+            try {
+                takeOut?.close()
+            } catch (e: IOException) {
+                Timber.e(e, "startTake: cannot close previous take")
+            }
+            takeOut = try {
+                FileOutputStream(takeFile, true)
+            } catch (e: IOException) {
+                Timber.e(e, "startTake: cannot open take file")
+                return false
+            }
+            currentTakeFile = takeFile
+            takeBytesWritten = 0L
+            takeAnchorMs = anchorMs.coerceAtLeast(0L)
+            taking = true
+        }
+        _isPaused = false
+        emitEvent(RecorderEvent.OnResumeRecording)
+        scheduleRecordingTimeUpdateBuffered()
+        return true
+    }
+
+    fun abortTake() {
+        synchronized(ioLock) {
+            taking = false
+            try {
+                takeOut?.close()
+            } catch (e: IOException) {
+                Timber.e(e, "abortTake: close failed")
+            }
+            takeOut = null
+            takeBytesWritten = 0L
+        }
+        try {
+            currentTakeFile?.delete()
+        } catch (e: SecurityException) {
+            Timber.e(e, "abortTake: delete denied")
+        }
+        currentTakeFile = null
+    }
+
+    fun stopTakeAndSplice(): Long {
+        if (!taking) return -1L
+        pauseRecording()
+        val takeFile: File
+        val anchorMs: Long
+        val takeLen: Long
+        synchronized(ioLock) {
+            takeFile = currentTakeFile ?: return -1L
+            anchorMs = takeAnchorMs
+            taking = false
+            try {
+                takeOut?.close()
+            } catch (e: IOException) {
+                Timber.e(e, "stopTakeAndSplice: take close failed")
+            }
+            takeOut = null
+            takeLen = takeBytesWritten
+            takeBytesWritten = 0L
+        }
+        val mainFile = currentMainFile
+        val bps = bytesPerSecond
+        val frame = currentFrameSize
+        if (mainFile == null || bps <= 0 || frame <= 0) return -1L
+        return try {
+            finalizeTakeHeader(takeFile, takeLen)
+            val newLen = spliceTakeIntoMain(mainFile, takeFile, anchorMs, takeLen, bps, frame)
+            if (newLen < 0) return -1L
+            synchronized(ioLock) {
+                try {
+                    mainOut?.close()
+                } catch (e: IOException) {
+                    Timber.e(e, "stopTakeAndSplice: main close failed")
+                }
+                mainOut = FileOutputStream(mainFile, true)
+                totalBytesWritten = newLen
+                durationMills = (newLen * 1000L) / bps
+                lastEmittedDurationMills = -1L
+            }
+            try {
+                takeFile.delete()
+            } catch (e: SecurityException) {
+                Timber.e(e, "stopTakeAndSplice: take delete denied")
+            }
+            currentTakeFile = null
+            durationMills
+        } catch (e: IOException) {
+            Timber.e(e, "stopTakeAndSplice failed")
+            -1L
+        }
+    }
+
+    @Throws(IOException::class)
+    private fun finalizeTakeHeader(takeFile: File, takeLen: Long) {
+        RandomAccessFile(takeFile, "rw").use { raf ->
+            raf.seek(0)
+            val out = FileOutputStream(raf.fd)
+            writeWavHeader(
+                out = out,
+                totalAudioLen = takeLen,
+                totalDataLen = takeLen + 36,
+                sampleRate = currentSampleRate,
+                channels = currentChannelCount,
+                byteRate = bytesPerSecond.toLong(),
+            )
+            out.flush()
+        }
+    }
+
+    @Throws(IOException::class)
+    private fun spliceTakeIntoMain(
+        mainFile: File,
+        takeFile: File,
+        anchorMs: Long,
+        takeLen: Long,
+        bps: Int,
+        frame: Int,
+    ): Long {
+        val oldLen = mainFile.length() - 44
+        if (oldLen < 0) throw IOException("main file has no header")
+        var anchorBytes = (anchorMs.coerceAtLeast(0L) * bps) / 1000L
+        anchorBytes -= anchorBytes % frame
+        anchorBytes = anchorBytes.coerceIn(0L, oldLen)
+        val punchEnd = anchorBytes + takeLen
+        val tailStart = punchEnd.coerceAtMost(oldLen)
+        val newLen = oldLen.coerceAtLeast(punchEnd)
+        val tmp = File(mainFile.parentFile, "${mainFile.name}.punchtmp")
+        if (tmp.exists()) tmp.delete()
+        FileOutputStream(tmp).use { out ->
+            out.write(ByteArray(44))
+            copyRange(mainFile, 44, 44 + anchorBytes, out)
+            copyRange(takeFile, 44, 44 + takeLen, out)
+            if (tailStart < oldLen) {
+                copyRange(mainFile, 44 + tailStart, 44 + oldLen, out)
+            }
+            out.flush()
+        }
+        RandomAccessFile(tmp, "rw").use { raf ->
+            raf.seek(0)
+            val headerOut = FileOutputStream(raf.fd)
+            writeWavHeader(
+                out = headerOut,
+                totalAudioLen = newLen,
+                totalDataLen = newLen + 36,
+                sampleRate = currentSampleRate,
+                channels = currentChannelCount,
+                byteRate = bps.toLong(),
+            )
+            headerOut.flush()
+        }
+        if (!mainFile.delete() || !tmp.renameTo(mainFile)) {
+            tmp.delete()
+            throw IOException("cannot replace main file")
+        }
+        return newLen
+    }
+
+    @Throws(IOException::class)
+    private fun copyRange(src: File, from: Long, to: Long, out: FileOutputStream) {
+        if (to <= from) return
+        java.io.FileInputStream(src).use { input ->
+            var skipped = 0L
+            while (skipped < from) {
+                val s = input.skip(from - skipped)
+                if (s <= 0) throw IOException("skip failed")
+                skipped += s
+            }
+            var left = to - from
+            val buf = ByteArray(8192)
+            while (left > 0) {
+                val n = input.read(buf, 0, left.coerceAtMost(buf.size.toLong()).toInt())
+                if (n < 0) throw IOException("unexpected eof")
+                out.write(buf, 0, n)
+                left -= n
+            }
+        }
     }
 
     /**

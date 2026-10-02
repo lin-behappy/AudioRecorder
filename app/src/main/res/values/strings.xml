@@ -35,8 +35,10 @@
 	<string name="msg_move_to_trash_failed">Failed to move recording to Trash</string>
 	<!-- Error message when moving a multiple recordings to Trash fails -->
 	<string name="msg_multiple_move_to_trash_failed">Failed to move recordings to Trash.</string>
-	<!-- Confirmation for canceling a recording session (progress discarded) -->
-	<string name="msg_recording_canceled">Canceled recording moved to Trash</string>
+ 	<!-- Confirmation for canceling a recording session (progress discarded) -->
+ 	<string name="msg_recording_canceled">Canceled recording moved to Trash</string>
+	<string name="msg_punch_seek_wav_only">Re-record from a position needs WAV format (Settings → Format → WAV)</string>
+	<string name="msg_punch_ready">Back to %1$s — resume to overwrite from here</string>
 	<!-- Confirmation for successful restoration after UNDO is clicked -->
 	<string name="msg_recording_restored">Recording \'%1$s\' restored</string>
 
@@ -360,6 +362,8 @@
 
 	<string name="button_record">Record</string>
 	<string name="button_stop">Stop</string>
+	<string name="button_rerecord">Re-record</string>
+	<string name="button_discard">Discard</string>
 	<string name="button_pause">Pause</string>
 	<string name="button_resume">Resume</string>
 	<string name="button_finish">Finish</string>

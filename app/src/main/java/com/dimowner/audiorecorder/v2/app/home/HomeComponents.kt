@@ -53,6 +53,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -62,6 +63,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,6 +86,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dimowner.audiorecorder.R
@@ -395,8 +398,10 @@ fun LegacySlider(
     progress: Float = 0f,
     onProgressChange: (Float) -> Unit,
     enabled: Boolean = true,
+    onSeekFinished: (Float) -> Unit = {},
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val currentProgress by rememberUpdatedState(progress)
     val trackHeight = 4.dp
     val thumbSize = DpSize(16.dp, 16.dp)
     val zeroThumbSize = DpSize(0.dp, 0.dp)
@@ -409,6 +414,7 @@ fun LegacySlider(
         value = progress,
         enabled = enabled,
         onValueChange = { onProgressChange(it) },
+        onValueChangeFinished = { onSeekFinished(currentProgress) },
         thumb = {
             val modifier = Modifier
                     .size(if (enabled) thumbSize else zeroThumbSize)
@@ -449,8 +455,8 @@ fun BottomBar(
     onSettingsClick: () -> Unit,
     onRecordsListClick: () -> Unit,
     onStartRecordingClick: () -> Unit,
-    onPauseRecordingClick: () -> Unit,
-    onResumeRecordingClick: () -> Unit,
+    rerecordLabel: String,
+    onRerecordClick: () -> Unit,
     onStopRecordingClick: () -> Unit,
     onDeleteRecordingClick: () -> Unit,
     bottomBarState: BottomBarState
@@ -486,14 +492,17 @@ fun BottomBar(
             BottomBarState.RECORDING -> {
                 RecordingProgressPanel(
                     modifier = Modifier,
-                    onPauseRecordingClick = onDebounceClick(onPauseRecordingClick),
+                    rerecordLabel = rerecordLabel,
+                    onRerecordClick = onDebounceClick(onRerecordClick),
                     onStopRecordingClick = onDebounceClick(onStopRecordingClick),
+                    onDeleteRecordingClick = onDebounceClick(onDeleteRecordingClick),
                 )
             }
             BottomBarState.PAUSED -> {
                 RecordingPausePanel(
                     modifier = Modifier,
-                    onResumeRecordingClick = onDebounceClick(onResumeRecordingClick),
+                    rerecordLabel = rerecordLabel,
+                    onRerecordClick = onDebounceClick(onRerecordClick),
                     onStopRecordingClick = onDebounceClick(onStopRecordingClick),
                     onDeleteRecordingClick = onDebounceClick(onDeleteRecordingClick),
                 )
@@ -518,7 +527,8 @@ fun BottomBar(
 fun CircleButton(
     modifier: Modifier,
     text: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    fontSize: TextUnit = 13.sp,
 ) {
     Button(
         onClick = onClick,
@@ -528,7 +538,7 @@ fun CircleButton(
     ) {
         Text(
             text = text,
-            fontSize = 13.sp
+            fontSize = fontSize
         )
     }
 }
@@ -546,31 +556,136 @@ fun CircleButtonPreview() {
 @Composable
 fun RecordingProgressPanel(
     modifier: Modifier,
-    onPauseRecordingClick: () -> Unit,
+    rerecordLabel: String,
+    onRerecordClick: () -> Unit,
     onStopRecordingClick: () -> Unit,
+    onDeleteRecordingClick: () -> Unit,
+) {
+    PunchActionRow(
+        modifier = modifier,
+        rerecordLabel = rerecordLabel,
+        onDeleteClick = onDeleteRecordingClick,
+        onRerecordClick = onRerecordClick,
+        onStopClick = onStopRecordingClick,
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+fun RecordingProgressPanelPreview() {
+    RecordingProgressPanel(Modifier, "Re-record", {}, {}, {})
+}
+
+@Composable
+fun RecordingPausePanel(
+    modifier: Modifier,
+    rerecordLabel: String,
+    onRerecordClick: () -> Unit,
+    onStopRecordingClick: () -> Unit,
+    onDeleteRecordingClick: () -> Unit,
+) {
+    PunchActionRow(
+        modifier = modifier,
+        rerecordLabel = rerecordLabel,
+        onDeleteClick = onDeleteRecordingClick,
+        onRerecordClick = onRerecordClick,
+        onStopClick = onStopRecordingClick,
+    )
+}
+
+@Composable
+fun PunchActionRow(
+    modifier: Modifier,
+    rerecordLabel: String,
+    onDeleteClick: () -> Unit,
+    onRerecordClick: () -> Unit,
+    onStopClick: () -> Unit,
 ) {
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-
-        Spacer(modifier = Modifier.size(width = 62.dp, 54.dp))
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            IconButton(
+                onClick = onDebounceClick(onDeleteClick),
+                modifier = Modifier.size(54.dp),
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_round_close),
+                    contentDescription = stringResource(R.string.button_discard),
+                )
+            }
+            Text(
+                text = stringResource(R.string.button_discard),
+                fontSize = 13.sp,
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
         CircleButton(
-            modifier = Modifier.size(80.dp),
-            text = stringResource(R.string.button_pause),
-            onClick = onDebounceClick(onPauseRecordingClick),
+            modifier = Modifier.size(96.dp),
+            text = rerecordLabel,
+            fontSize = 14.sp,
+            onClick = onDebounceClick(onRerecordClick),
         )
         Spacer(modifier = Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            IconButton(
+                onClick = onDebounceClick(onStopClick),
+                modifier = Modifier.size(54.dp),
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_check_circle),
+                    contentDescription = stringResource(R.string.btn_save),
+                )
+            }
+            Text(
+                text = stringResource(R.string.btn_save),
+                fontSize = 13.sp,
+            )
+        }
+    }
+}
 
+@Composable
+fun TransportRow(
+    modifier: Modifier,
+    auditionPlaying: Boolean,
+    onJumpStartClick: () -> Unit,
+    onAuditionClick: () -> Unit,
+    onJumpEndClick: () -> Unit,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+    ) {
         IconButton(
-            onClick = onDebounceClick(onStopRecordingClick),
-            modifier = Modifier
-                .size(54.dp)
-                .align(Alignment.CenterVertically),
+            onClick = onDebounceClick(onJumpStartClick),
+            modifier = Modifier.size(48.dp),
         ) {
             Icon(
-                painter = painterResource(id = R.drawable.ic_stop),
-                contentDescription = stringResource(R.string.button_stop)
+                painter = painterResource(id = R.drawable.ic_skip_previous),
+                contentDescription = "Back to start",
+            )
+        }
+        IconButton(
+            onClick = onDebounceClick(onAuditionClick),
+            modifier = Modifier.size(56.dp),
+        ) {
+            Icon(
+                painter = painterResource(
+                    id = if (auditionPlaying) R.drawable.ic_pause else R.drawable.ic_play
+                ),
+                contentDescription = "Audition",
+            )
+        }
+        IconButton(
+            onClick = onDebounceClick(onJumpEndClick),
+            modifier = Modifier.size(48.dp),
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_skip_next),
+                contentDescription = "Forward to end",
             )
         }
     }
@@ -578,115 +693,26 @@ fun RecordingProgressPanel(
 
 @Preview(showBackground = true)
 @Composable
-fun RecordingProgressPanelPreview() {
-    RecordingProgressPanel(Modifier, {}, {})
-}
-
-@Composable
-fun RecordingPausePanel(
-    modifier: Modifier,
-    onResumeRecordingClick: () -> Unit,
-    onStopRecordingClick: () -> Unit,
-    onDeleteRecordingClick: () -> Unit,
-) {
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Button(
-            modifier = Modifier.size(94.dp, 48.dp),
-            onClick = onDebounceClick(onDeleteRecordingClick),
-            contentPadding = PaddingValues(6.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFFD01716),
-                contentColor = Color.White
-            ),
-            elevation = ButtonDefaults.buttonElevation(
-                defaultElevation = 0.dp, // Removes the default shadow
-                pressedElevation = 0.dp  // Prevents a shadow when pressed
-            ),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Text(
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.End,
-                    text = stringResource(R.string.delete),
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                )
-                Icon(
-                    modifier = Modifier.size(32.dp).padding(2.dp),
-                    painter = painterResource(id = R.drawable.ic_delete_forever_36),
-                    contentDescription = stringResource(id = R.string.delete),
-                )
-            }
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        CircleButton(
-            modifier = Modifier.size(80.dp),
-            text = stringResource(R.string.button_resume),
-            onClick = onDebounceClick(onResumeRecordingClick),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Button(
-            modifier = Modifier.size(94.dp, 48.dp),
-            onClick = onDebounceClick(onStopRecordingClick),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF48A54B),
-                contentColor = Color.White
-            ),
-            contentPadding = PaddingValues(6.dp),
-            elevation = ButtonDefaults.buttonElevation(
-                defaultElevation = 0.dp, // Removes the default shadow
-                pressedElevation = 0.dp  // Prevents a shadow when pressed
-            ),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Icon(
-                    modifier = Modifier.size(32.dp).padding(2.dp),
-                    painter = painterResource(id = R.drawable.ic_stop),
-                    contentDescription = stringResource(R.string.button_stop),
-                )
-                Text(
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Start,
-                    text = stringResource(R.string.button_stop),
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
 fun RecordingPausePanelPreview() {
-    RecordingPausePanel(Modifier, {}, {}, {})
+    RecordingPausePanel(Modifier, "Re-record", {}, {}, {})
 }
 
 @Preview(showBackground = true)
 @Composable
 fun BottomBarReadyPreview() {
-    BottomBar({}, {}, {}, {}, {}, {}, {}, BottomBarState.READY_TO_START_RECORDING)
+    BottomBar({}, {}, {}, "", {}, {}, {}, BottomBarState.READY_TO_START_RECORDING)
 }
 
 @Preview(showBackground = true)
 @Composable
 fun BottomBarRecordingPreview() {
-    BottomBar({}, {}, {}, {}, {}, {}, {}, BottomBarState.RECORDING)
+    BottomBar({}, {}, {}, "", {}, {}, {}, BottomBarState.RECORDING)
 }
 
 @Preview(showBackground = true)
 @Composable
 fun BottomBarPausedPreview() {
-    BottomBar({}, {}, {}, {}, {}, {}, {}, BottomBarState.PAUSED)
+    BottomBar({}, {}, {}, "", {}, {}, {}, BottomBarState.PAUSED)
 }
 
 @Composable
@@ -702,7 +728,11 @@ fun TimePanel(
     isRenameAvailable: Boolean,
     onRenameClick: () -> Unit,
     onDescriptionClick: () -> Unit,
-    onProgressChange: (Float) -> Unit
+    onProgressChange: (Float) -> Unit,
+    punchHint: String = "",
+    isRecordingSlider: Boolean = false,
+    onProgressFinished: (Float) -> Unit = {},
+    showSlider: Boolean = true,
 ) {
     Column(
         modifier = Modifier
@@ -798,11 +828,26 @@ fun TimePanel(
                 fontWeight = FontWeight.Normal
             )
         }
-        LegacySlider(
-            progress = progress,
-            onProgressChange = onProgressChange,
-            enabled = isSliderEnabled
-        )
+        if (showSlider) {
+            LegacySlider(
+                progress = progress,
+                onProgressChange = onProgressChange,
+                enabled = isSliderEnabled,
+                onSeekFinished = { if (isRecordingSlider) onProgressFinished(it) },
+            )
+        }
+        if (punchHint.isNotEmpty()) {
+            Text(
+                modifier = Modifier
+                    .wrapContentSize()
+                    .padding(horizontal = 16.dp),
+                textAlign = TextAlign.Center,
+                text = punchHint,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                fontSize = 13.sp,
+            )
+        }
     }
 }
 

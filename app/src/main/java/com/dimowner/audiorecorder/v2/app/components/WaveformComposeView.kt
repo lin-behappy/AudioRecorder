@@ -5,12 +5,16 @@ import android.graphics.Typeface
 import android.text.TextPaint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Size
@@ -55,12 +59,46 @@ fun WaveformComposeView(
     showTimeline: Boolean,
     onSeekStart: () -> Unit,
     onSeekEnd: (mills: Long) -> Unit,
-    onSeekProgress: (mills: Long) -> Unit
+    onSeekProgress: (mills: Long) -> Unit,
+    punchPickEnabled: Boolean = false,
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val viewState = remember {
         mutableStateOf(WaveformViewState(drawLinesArray = floatArrayOf()))
+    }
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    var lastAnchorNull by remember { mutableStateOf(true) }
+    LaunchedEffect(
+        state.durationMills, state.widthScale, state.durationSample,
+        state.punchAnchorMs, state.isRecording, viewSize
+    ) {
+        if (viewSize == IntSize.Zero) return@LaunchedEffect
+        val durationPx = viewSize.width * state.widthScale
+        if (durationPx <= 0f) return@LaunchedEffect
+        val millsPerPx = state.durationMills / durationPx
+        val pxPerMill = if (state.durationMills > 0) durationPx / state.durationMills else 0f
+        val pxPerSample = if (state.durationSample > 0) durationPx / state.durationSample else 0f
+        val samplePerPx = if (durationPx > 0) state.durationSample / durationPx else 0f
+        if (!pxPerMill.isFinite() || pxPerMill <= 0f || !millsPerPx.isFinite()) return@LaunchedEffect
+        val nowNull = state.punchAnchorMs == null
+        var shift = viewState.value.waveformShiftPx
+        if (state.isRecording && nowNull && !lastAnchorNull) {
+            shift = updateShift(
+                durationPx, viewSize,
+                (-(state.progressMills * pxPerMill)).toInt() + viewSize.width / 2
+            )
+        }
+        shift = updateShift(durationPx, viewSize, shift.toInt())
+        viewState.value = viewState.value.copy(
+            waveformShiftPx = shift,
+            durationPx = durationPx,
+            millsPerPx = millsPerPx,
+            pxPerMill = pxPerMill,
+            pxPerSample = pxPerSample,
+            samplePerPx = samplePerPx,
+        )
+        lastAnchorNull = nowNull
     }
     val waveformColor =  MaterialTheme.colorScheme.primary.toArgb()
     val gridColor =  MaterialTheme.colorScheme.secondary.toArgb()
@@ -112,6 +150,7 @@ fun WaveformComposeView(
         // the full screen width but overlaps neighbouring panes in landscape/two-pane layouts.
         .clipToBounds()
         .onSizeChanged {
+            viewSize = it
             val durationPx = it.width * state.widthScale
             val millsPerPx = state.durationMills / durationPx
             val pxPerMill = durationPx / state.durationMills
@@ -135,11 +174,13 @@ fun WaveformComposeView(
                 textHeight = textHeight
             )
         }
-        .pointerInput(Unit) {
-            if (!state.isRecording) {
+        .pointerInput(punchPickEnabled) {
+            if (!state.isRecording || punchPickEnabled) {
                 detectDragGestures(
                     onDragStart = {
-                        onSeekStart()
+                        if (!state.isRecording) {
+                            onSeekStart()
+                        }
                     },
                     onDrag = { change, dragAmount ->
                         val shift = updateShift(
@@ -157,6 +198,20 @@ fun WaveformComposeView(
                         val half = size.width / 2
                         onSeekEnd(((-shift + half) * viewState.value.millsPerPx).toLong())
                     },
+                )
+            }
+        }
+        .pointerInput(punchPickEnabled) {
+            if (punchPickEnabled && state.isRecording) {
+                detectTapGestures(
+                    onTap = { offset ->
+                        val anchor = (
+                            (offset.x - viewState.value.waveformShiftPx) *
+                                viewState.value.millsPerPx
+                            ).toLong()
+                        onSeekProgress(anchor)
+                        onSeekEnd(anchor)
+                    }
                 )
             }
         }
@@ -471,6 +526,7 @@ data class WaveformState(
      * this offset, ensuring the waveform scrolls in sync with the grid.
      */
     val waveformDataOffset: Int = 0,
+    val punchAnchorMs: Long? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -484,6 +540,7 @@ data class WaveformState(
         if (durationSample != other.durationSample) return false
         if (gridStepMills != other.gridStepMills) return false
         if (waveformDataOffset != other.waveformDataOffset) return false
+        if (punchAnchorMs != other.punchAnchorMs) return false
 
         return true
     }
@@ -497,6 +554,7 @@ data class WaveformState(
         result = 31 * result + durationSample
         result = 31 * result + gridStepMills.hashCode()
         result = 31 * result + waveformDataOffset.hashCode()
+        result = 31 * result + (punchAnchorMs?.hashCode() ?: 0)
         return result
     }
 }
