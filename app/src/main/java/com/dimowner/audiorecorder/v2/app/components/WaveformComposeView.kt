@@ -88,8 +88,9 @@ fun WaveformComposeView(
                 durationPx, viewSize,
                 (-(state.progressMills * pxPerMill)).toInt() + viewSize.width / 2
             )
+        } else if (!state.isRecording || nowNull) {
+            shift = updateShift(durationPx, viewSize, shift.toInt())
         }
-        shift = updateShift(durationPx, viewSize, shift.toInt())
         viewState.value = viewState.value.copy(
             waveformShiftPx = shift,
             durationPx = durationPx,
@@ -183,15 +184,24 @@ fun WaveformComposeView(
                         }
                     },
                     onDrag = { change, dragAmount ->
-                        val shift = updateShift(
-                            viewState.value.durationPx, size,
-                            (viewState.value.waveformShiftPx + dragAmount.x).toInt()
-                        )
-                        val half = size.width / 2
-                        viewState.value = viewState.value.copy(
-                            waveformShiftPx = shift
-                        )
-                        onSeekProgress(((-shift + half) * viewState.value.millsPerPx).toLong())
+                        if (state.isRecording) {
+                            val half = size.width / 2
+                            val shift = viewState.value.waveformShiftPx + dragAmount.x
+                            viewState.value = viewState.value.copy(
+                                waveformShiftPx = shift
+                            )
+                            onSeekProgress(((-shift + half) * viewState.value.millsPerPx).toLong())
+                        } else {
+                            val shift = updateShift(
+                                viewState.value.durationPx, size,
+                                (viewState.value.waveformShiftPx + dragAmount.x).toInt()
+                            )
+                            val half = size.width / 2
+                            viewState.value = viewState.value.copy(
+                                waveformShiftPx = shift
+                            )
+                            onSeekProgress(((-shift + half) * viewState.value.millsPerPx).toLong())
+                        }
                     },
                     onDragEnd = {
                         val shift = viewState.value.waveformShiftPx.toInt()
