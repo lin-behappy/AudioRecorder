@@ -14,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -69,6 +70,7 @@ fun WaveformComposeView(
     }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var lastAnchorNull by remember { mutableStateOf(true) }
+    val isRecordingNow by rememberUpdatedState(state.isRecording)
     LaunchedEffect(
         state.durationMills, state.widthScale, state.durationSample,
         state.punchAnchorMs, state.isRecording, viewSize
@@ -176,15 +178,15 @@ fun WaveformComposeView(
             )
         }
         .pointerInput(punchPickEnabled) {
-            if (!state.isRecording || punchPickEnabled) {
+            if (!isRecordingNow || punchPickEnabled) {
                 detectDragGestures(
                     onDragStart = {
-                        if (!state.isRecording) {
+                        if (!isRecordingNow) {
                             onSeekStart()
                         }
                     },
                     onDrag = { change, dragAmount ->
-                        if (state.isRecording) {
+                        if (isRecordingNow) {
                             val half = size.width / 2
                             val shift = viewState.value.waveformShiftPx + dragAmount.x
                             viewState.value = viewState.value.copy(
@@ -212,7 +214,7 @@ fun WaveformComposeView(
             }
         }
         .pointerInput(punchPickEnabled) {
-            if (punchPickEnabled && state.isRecording) {
+            if (punchPickEnabled && isRecordingNow) {
                 detectTapGestures(
                     onTap = { offset ->
                         val anchor = (
