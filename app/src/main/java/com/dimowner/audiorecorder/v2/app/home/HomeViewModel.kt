@@ -396,6 +396,7 @@ class HomeViewModel @Inject constructor(
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
                                 punchAnchorMs = _state.value.punchPointMs,
+                                widthScale = recState.widthScale,
                             )
                         )
                     }

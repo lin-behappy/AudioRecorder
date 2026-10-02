@@ -69,11 +69,14 @@ fun WaveformComposeView(
         mutableStateOf(WaveformViewState(drawLinesArray = floatArrayOf()))
     }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
-    var lastAnchorNull by remember { mutableStateOf(true) }
+    var isUserDragging by remember { mutableStateOf(false) }
     val isRecordingNow by rememberUpdatedState(state.isRecording)
+    val currentOnSeekStart by rememberUpdatedState(onSeekStart)
+    val currentOnSeekProgress by rememberUpdatedState(onSeekProgress)
+    val currentOnSeekEnd by rememberUpdatedState(onSeekEnd)
     LaunchedEffect(
         state.durationMills, state.widthScale, state.durationSample,
-        state.punchAnchorMs, state.isRecording, viewSize
+        state.punchAnchorMs, state.isRecording, state.progressMills, viewSize
     ) {
         if (viewSize == IntSize.Zero) return@LaunchedEffect
         val durationPx = viewSize.width * state.widthScale
@@ -83,15 +86,19 @@ fun WaveformComposeView(
         val pxPerSample = if (state.durationSample > 0) durationPx / state.durationSample else 0f
         val samplePerPx = if (durationPx > 0) state.durationSample / durationPx else 0f
         if (!pxPerMill.isFinite() || pxPerMill <= 0f || !millsPerPx.isFinite()) return@LaunchedEffect
-        val nowNull = state.punchAnchorMs == null
-        var shift = viewState.value.waveformShiftPx
-        if (state.isRecording && nowNull && !lastAnchorNull) {
-            shift = updateShift(
+        // Shift ownership: while actively recording with no punch anchor and no user drag in
+        // progress, follow the recording head. In every other case (idle, playing, anchored,
+        // dragging) keep the current shift and only clamp it into the valid scroll range so
+        // the view can never rest past the beginning or the end of the waveform.
+        val followHead =
+            state.isRecording && state.punchAnchorMs == null && !isUserDragging
+        val shift = if (followHead) {
+            updateShift(
                 durationPx, viewSize,
                 (-(state.progressMills * pxPerMill)).toInt() + viewSize.width / 2
             )
-        } else if (!state.isRecording || nowNull) {
-            shift = updateShift(durationPx, viewSize, shift.toInt())
+        } else {
+            updateShift(durationPx, viewSize, viewState.value.waveformShiftPx.toInt())
         }
         viewState.value = viewState.value.copy(
             waveformShiftPx = shift,
@@ -101,7 +108,6 @@ fun WaveformComposeView(
             pxPerSample = pxPerSample,
             samplePerPx = samplePerPx,
         )
-        lastAnchorNull = nowNull
     }
     val waveformColor =  MaterialTheme.colorScheme.primary.toArgb()
     val gridColor =  MaterialTheme.colorScheme.secondary.toArgb()
@@ -155,19 +161,19 @@ fun WaveformComposeView(
         .onSizeChanged {
             viewSize = it
             val durationPx = it.width * state.widthScale
-            val millsPerPx = state.durationMills / durationPx
-            val pxPerMill = durationPx / state.durationMills
-            val pxPerSample = durationPx / state.durationSample
-            val samplePerPx = state.durationSample / durationPx
+            val millsPerPx = if (state.durationMills > 0) state.durationMills / durationPx else 0f
+            val pxPerMill = if (state.durationMills > 0) durationPx / state.durationMills else 0f
+            val pxPerSample =
+                if (state.durationSample > 0) durationPx / state.durationSample else 0f
+            val samplePerPx = if (durationPx > 0) state.durationSample / durationPx else 0f
             val textHeight = with(density) { 14.sp.toPx() }
-            val waveformShiftPx = updateShift(
-                durationPx, it,
-                -(state.progressMills * pxPerMill).toInt()+it.width/2
-            )
 
+            // waveformShiftPx is deliberately NOT written here: the tick effect owns the scroll
+            // position and applies the follow-the-head rule. A punch preview shows a hint row that
+            // shrinks this pane, and recomputing the head position on every resize would cancel a
+            // drag in progress (the view snapped back to the head on each layout pass).
             viewState.value = viewState.value.copy(
                 textIndent = if (showTimeline) textHeight + PADD else 0f,
-                waveformShiftPx = waveformShiftPx,
                 durationPx = durationPx,
                 millsPerPx = millsPerPx,
                 pxPerMill = pxPerMill,
@@ -181,51 +187,57 @@ fun WaveformComposeView(
             if (!isRecordingNow || punchPickEnabled) {
                 detectDragGestures(
                     onDragStart = {
+                        isUserDragging = true
                         if (!isRecordingNow) {
-                            onSeekStart()
+                            currentOnSeekStart()
                         }
                     },
                     onDrag = { change, dragAmount ->
-                        if (isRecordingNow) {
-                            val half = size.width / 2
-                            val shift = viewState.value.waveformShiftPx + dragAmount.x
-                            viewState.value = viewState.value.copy(
-                                waveformShiftPx = shift
-                            )
-                            onSeekProgress(((-shift + half) * viewState.value.millsPerPx).toLong())
-                        } else {
-                            val shift = updateShift(
-                                viewState.value.durationPx, size,
-                                (viewState.value.waveformShiftPx + dragAmount.x).toInt()
-                            )
-                            val half = size.width / 2
-                            viewState.value = viewState.value.copy(
-                                waveformShiftPx = shift
-                            )
-                            onSeekProgress(((-shift + half) * viewState.value.millsPerPx).toLong())
-                        }
+                        // Both modes clamp through updateShift: the scroll range maps exactly
+                        // to [0, durationMills], so the drag can reach the start but never
+                        // rest past the recorded end (or before zero).
+                        val shift = updateShift(
+                            viewState.value.durationPx, size,
+                            (viewState.value.waveformShiftPx + dragAmount.x).toInt()
+                        )
+                        val half = size.width / 2
+                        viewState.value = viewState.value.copy(
+                            waveformShiftPx = shift
+                        )
+                        currentOnSeekProgress(
+                            ((-shift + half) * viewState.value.millsPerPx).toLong()
+                        )
                     },
                     onDragEnd = {
                         val shift = viewState.value.waveformShiftPx.toInt()
                         val half = size.width / 2
-                        onSeekEnd(((-shift + half) * viewState.value.millsPerPx).toLong())
+                        currentOnSeekEnd(
+                            ((-shift + half) * viewState.value.millsPerPx).toLong()
+                        )
+                        isUserDragging = false
+                    },
+                    onDragCancel = {
+                        isUserDragging = false
                     },
                 )
             }
         }
         .pointerInput(punchPickEnabled) {
-            if (punchPickEnabled && isRecordingNow) {
-                detectTapGestures(
-                    onTap = { offset ->
+            detectTapGestures(
+                onTap = { offset ->
+                    if (punchPickEnabled && isRecordingNow) {
+                        val durationMills =
+                            viewState.value.durationPx * viewState.value.millsPerPx
                         val anchor = (
                             (offset.x - viewState.value.waveformShiftPx) *
                                 viewState.value.millsPerPx
                             ).toLong()
-                        onSeekProgress(anchor)
-                        onSeekEnd(anchor)
+                            .coerceIn(0L, durationMills.toLong())
+                        currentOnSeekProgress(anchor)
+                        currentOnSeekEnd(anchor)
                     }
-                )
-            }
+                }
+            )
         }
     ) {
         drawIntoCanvas { canvas ->
