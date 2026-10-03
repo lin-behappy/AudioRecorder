@@ -881,8 +881,11 @@ class AudioRecordingService : Service() {
         val dur = _recordingState.value.durationMills
         if (dur <= 0) return -1L
         val anchor = anchorMs.coerceIn(0L, dur)
+        // startTake() requires the recorder to be paused, but pausing through pauseRecording()
+        // publishes OnPauseRecording, so the UI flipped to "paused" and the re-record button greyed
+        // out while the take was still capturing. Pause the writer directly instead.
         if (!st.isPaused()) {
-            rec.pauseRecording()
+            rec.pauseForTake()
         }
         if (!punchStartTake(rec, anchor)) return -1L
         val interval = AppConstants.RECORDING_VISUALIZATION_INTERVAL_NEW.toLong()

@@ -432,6 +432,13 @@ class WavRecorderV2 @Inject constructor(
         return true
     }
 
+    /** Halts sample writes without publishing a user pause, so a punch take can be armed. */
+    fun pauseForTake(): Boolean {
+        if (!_isRecording || _isPaused) return false
+        synchronized(ioLock) { _isPaused = true }
+        return true
+    }
+
     fun abortTake() {
         synchronized(ioLock) {
             taking = false
@@ -453,7 +460,12 @@ class WavRecorderV2 @Inject constructor(
 
     fun stopTakeAndSplice(): Long {
         if (!taking) return -1L
-        pauseRecording()
+        // Do NOT route this through pauseRecording(): that flips _isPaused, which the capture loop
+        // reads as "discard samples" and publishes as a user pause. While a take is live _isPaused
+        // is already false, so pausing here logged "Recording has already paused" and returned
+        // early, leaving the UI stuck on "paused" and the take unspliced. Flipping the flag under
+        // ioLock halts take writes without emitting a pause the user never asked for.
+        synchronized(ioLock) { _isPaused = true }
         val takeFile: File
         val anchorMs: Long
         val takeLen: Long
