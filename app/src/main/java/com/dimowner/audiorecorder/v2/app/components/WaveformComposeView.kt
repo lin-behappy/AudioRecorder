@@ -93,16 +93,12 @@ fun WaveformComposeView(
         val pxPerSample = if (state.durationSample > 0) durationPx / state.durationSample else 0f
         val samplePerPx = if (durationPx > 0) state.durationSample / durationPx else 0f
         if (!pxPerMill.isFinite() || pxPerMill <= 0f || !millsPerPx.isFinite()) return@LaunchedEffect
-        // Shift ownership: while actively recording with no punch anchor and no user drag in
-        // progress, follow the recording head. In every other case (idle, playing, anchored,
-        // dragging) keep the current shift and only clamp it into the valid scroll range so
-        // the view can never rest past the beginning or the end of the waveform.
-        // Follow the head only while the recorder is actually capturing and no anchor has been
-        // picked. isCapturing rather than isRecording, because a paused recorder still reports
-        // isRecording, and scrolling then fights every drag the user makes to inspect or re-pick
-        // a position -- the drag moves, the next tick snaps it back, and the gesture looks dead.
-        // An audition follows too, since its standalone player drives progressMills.
-        val followHead = ((state.isCapturing && state.punchAnchorMs == null) ||
+        // isCapturing, not isRecording: a paused recorder still reports isRecording, and scrolling
+        // then fights every drag the user makes to re-pick a position. An anchor alone must not stop
+        // the scroll either -- re-recording punches a take in at that very anchor, so while
+        // isTakingPunch the head genuinely advances. Only a chosen-but-not-yet-taken anchor parks.
+        val followHead = (state.isCapturing &&
+            (state.punchAnchorMs == null || state.isTakingPunch) ||
             state.auditionPlaying) && !isUserDragging && !hasDraggedWaveform
         val shift = if (followHead) {
             updateShift(
