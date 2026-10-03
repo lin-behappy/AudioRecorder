@@ -519,6 +519,70 @@ class WavRecorderV2 @Inject constructor(
         }
     }
 
+    /** Byte ranges of a punch splice: head up to the anchor, the take, and the surviving tail. */
+    private data class PunchRanges(
+        val oldLen: Long,
+        val anchorBytes: Long,
+        val tailStart: Long,
+        val newLen: Long,
+    )
+
+    @Throws(IOException::class)
+    private fun computePunchRanges(
+        mainFile: File,
+        anchorMs: Long,
+        takeLen: Long,
+        bps: Int,
+        frame: Int,
+    ): PunchRanges {
+        val oldLen = mainFile.length() - 44
+        if (oldLen < 0) throw IOException("main file has no header")
+        var anchorBytes = (anchorMs.coerceAtLeast(0L) * bps) / 1000L
+        anchorBytes -= anchorBytes % frame
+        anchorBytes = anchorBytes.coerceIn(0L, oldLen)
+        val punchEnd = anchorBytes + takeLen
+        return PunchRanges(
+            oldLen = oldLen,
+            anchorBytes = anchorBytes,
+            tailStart = punchEnd.coerceAtMost(oldLen),
+            newLen = oldLen.coerceAtLeast(punchEnd),
+        )
+    }
+
+    @Throws(IOException::class)
+    private fun writePunchBody(
+        out: FileOutputStream,
+        mainFile: File,
+        takeFile: File,
+        takeLen: Long,
+        ranges: PunchRanges,
+    ) {
+        out.write(ByteArray(44))
+        copyRange(mainFile, 44, 44 + ranges.anchorBytes, out)
+        if (takeLen > 0) copyRange(takeFile, 44, 44 + takeLen, out)
+        if (ranges.tailStart < ranges.oldLen) {
+            copyRange(mainFile, 44 + ranges.tailStart, 44 + ranges.oldLen, out)
+        }
+        out.flush()
+    }
+
+    @Throws(IOException::class)
+    private fun writeWavHeaderInPlace(dest: File, totalAudioLen: Long, byteRate: Long) {
+        RandomAccessFile(dest, "rw").use { raf ->
+            raf.seek(0)
+            val headerOut = FileOutputStream(raf.fd)
+            writeWavHeader(
+                out = headerOut,
+                totalAudioLen = totalAudioLen,
+                totalDataLen = totalAudioLen + 36,
+                sampleRate = currentSampleRate,
+                channels = currentChannelCount,
+                byteRate = byteRate,
+            )
+            headerOut.flush()
+        }
+    }
+
     @Throws(IOException::class)
     private fun spliceTakeIntoMain(
         mainFile: File,
@@ -528,43 +592,42 @@ class WavRecorderV2 @Inject constructor(
         bps: Int,
         frame: Int,
     ): Long {
-        val oldLen = mainFile.length() - 44
-        if (oldLen < 0) throw IOException("main file has no header")
-        var anchorBytes = (anchorMs.coerceAtLeast(0L) * bps) / 1000L
-        anchorBytes -= anchorBytes % frame
-        anchorBytes = anchorBytes.coerceIn(0L, oldLen)
-        val punchEnd = anchorBytes + takeLen
-        val tailStart = punchEnd.coerceAtMost(oldLen)
-        val newLen = oldLen.coerceAtLeast(punchEnd)
+        val ranges = computePunchRanges(mainFile, anchorMs, takeLen, bps, frame)
         val tmp = File(mainFile.parentFile, "${mainFile.name}.punchtmp")
         if (tmp.exists()) tmp.delete()
         FileOutputStream(tmp).use { out ->
-            out.write(ByteArray(44))
-            copyRange(mainFile, 44, 44 + anchorBytes, out)
-            copyRange(takeFile, 44, 44 + takeLen, out)
-            if (tailStart < oldLen) {
-                copyRange(mainFile, 44 + tailStart, 44 + oldLen, out)
-            }
-            out.flush()
+            writePunchBody(out, mainFile, takeFile, takeLen, ranges)
         }
-        RandomAccessFile(tmp, "rw").use { raf ->
-            raf.seek(0)
-            val headerOut = FileOutputStream(raf.fd)
-            writeWavHeader(
-                out = headerOut,
-                totalAudioLen = newLen,
-                totalDataLen = newLen + 36,
-                sampleRate = currentSampleRate,
-                channels = currentChannelCount,
-                byteRate = bps.toLong(),
-            )
-            headerOut.flush()
-        }
+        writeWavHeaderInPlace(tmp, ranges.newLen, bps.toLong())
         if (!mainFile.delete() || !tmp.renameTo(mainFile)) {
             tmp.delete()
             throw IOException("cannot replace main file")
         }
-        return newLen
+        return ranges.newLen
+    }
+
+    /**
+     * Writes the session as it will sound after the punch (head + take + tail) into [dest]
+     * without touching the recording, so audition works while the take is still growing.
+     * Returns false when no take is being captured, where the main file is the whole session.
+     */
+    @Throws(IOException::class)
+    fun exportSessionSnapshot(dest: File): Boolean {
+        val mainFile = currentMainFile ?: return false
+        val bps = bytesPerSecond
+        val frame = currentFrameSize
+        if (bps <= 0 || frame <= 0) return false
+        val (takeFile, takeLen, anchorMs) = synchronized(ioLock) {
+            val f = currentTakeFile
+            if (!taking || f == null) return false
+            Triple(f, takeBytesWritten, takeAnchorMs)
+        }
+        val ranges = computePunchRanges(mainFile, anchorMs, takeLen, bps, frame)
+        FileOutputStream(dest).use { out ->
+            writePunchBody(out, mainFile, takeFile, takeLen, ranges)
+        }
+        writeWavHeaderInPlace(dest, ranges.newLen, bps.toLong())
+        return true
     }
 
     @Throws(IOException::class)

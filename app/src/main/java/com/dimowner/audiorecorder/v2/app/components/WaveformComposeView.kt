@@ -90,8 +90,11 @@ fun WaveformComposeView(
         // progress, follow the recording head. In every other case (idle, playing, anchored,
         // dragging) keep the current shift and only clamp it into the valid scroll range so
         // the view can never rest past the beginning or the end of the waveform.
-        val followHead =
-            state.isRecording && state.punchAnchorMs == null && !isUserDragging
+        // Follow the head while recording, including while a punch take is capturing: the head
+        // is the take's write position, so keeping pace with it is what makes the fresh audio
+        // visible. An anchor that is only chosen (punch not started yet) must not move the view.
+        val followHead = state.isRecording && !isUserDragging &&
+            (state.punchAnchorMs == null || state.takeActive)
         val shift = if (followHead) {
             updateShift(
                 durationPx, viewSize,
@@ -551,6 +554,7 @@ data class WaveformState(
      */
     val waveformDataOffset: Int = 0,
     val punchAnchorMs: Long? = null,
+    val takeActive: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -565,6 +569,7 @@ data class WaveformState(
         if (gridStepMills != other.gridStepMills) return false
         if (waveformDataOffset != other.waveformDataOffset) return false
         if (punchAnchorMs != other.punchAnchorMs) return false
+        if (takeActive != other.takeActive) return false
 
         return true
     }
@@ -579,6 +584,7 @@ data class WaveformState(
         result = 31 * result + gridStepMills.hashCode()
         result = 31 * result + waveformDataOffset.hashCode()
         result = 31 * result + (punchAnchorMs?.hashCode() ?: 0)
+        result = 31 * result + takeActive.hashCode()
         return result
     }
 }

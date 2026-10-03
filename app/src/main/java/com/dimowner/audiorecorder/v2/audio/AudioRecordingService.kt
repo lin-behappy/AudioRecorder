@@ -77,6 +77,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
+import java.io.IOException
 import java.util.LinkedList
 import javax.inject.Inject
 
@@ -897,9 +898,28 @@ class AudioRecordingService : Service() {
             totalSampleCount = anchorSamples,
             waveformDataOffset = (anchorSamples - amps.size).coerceAtLeast(0),
             widthScale = anchor * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD),
+            isTakingPunch = true,
         )
         updateNotification()
         return anchor
+    }
+
+    fun isPunchTakeActive(): Boolean {
+        return (audioRecorder as? WavRecorderV2)?.isTaking() == true
+    }
+
+    /**
+     * Writes the punch result (head + take + tail) to [dest] for audition, or returns false
+     * when no take is active and the main file alone is the session.
+     */
+    fun writePunchSnapshot(dest: File): Boolean {
+        val rec = audioRecorder as? WavRecorderV2 ?: return false
+        return try {
+            rec.exportSessionSnapshot(dest)
+        } catch (e: IOException) {
+            Timber.e(e, "punch snapshot failed")
+            false
+        }
     }
 
     private suspend fun handleRecordingStopped(isNotMaxDurationHandling: Boolean = true) {
@@ -930,6 +950,7 @@ class AudioRecordingService : Service() {
                     val success = recordsDataSource.updateRecord(recordUpdated)
                     _recordingState.value = _recordingState.value.copy(
                         recordingState = RecordingState.STOPPED,
+                        isTakingPunch = false,
                     )
                     if (success) {
                         prefs.activeRecordId = recordedRecordId
@@ -1001,6 +1022,7 @@ class AudioRecordingService : Service() {
             prefs.activeRecordId = recordId
             _recordingState.value = _recordingState.value.copy(
                 recordingState = RecordingState.STOPPED,
+                isTakingPunch = false,
             )
             emitEvent(AudioRecordingServiceEvent.ShowInfoSnack(
                 applicationContext.getString(R.string.msg_recording_saved_with_name, recovered.name)
@@ -1252,6 +1274,8 @@ data class RecordingServiceState(
     val waveformDataOffset: Int = 0,
     /** Width scale for waveform rendering. */
     val widthScale: Float = 1.5f,
+    /** True while a punch take is capturing; the main file holds only the audio before it. */
+    val isTakingPunch: Boolean = false,
 ) {
 
     fun isRecording(): Boolean {
@@ -1285,6 +1309,7 @@ data class RecordingServiceState(
         if (totalSampleCount != other.totalSampleCount) return false
         if (waveformDataOffset != other.waveformDataOffset) return false
         if (widthScale != other.widthScale) return false
+        if (isTakingPunch != other.isTakingPunch) return false
         return true
     }
 
@@ -1302,6 +1327,7 @@ data class RecordingServiceState(
         result = 31 * result + totalSampleCount
         result = 31 * result + waveformDataOffset
         result = 31 * result + widthScale.hashCode()
+        result = 31 * result + isTakingPunch.hashCode()
         return result
     }
 }

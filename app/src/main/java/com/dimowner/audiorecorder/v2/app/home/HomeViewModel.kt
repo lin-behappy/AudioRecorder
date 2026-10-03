@@ -326,6 +326,7 @@ class HomeViewModel @Inject constructor(
                         isShowWaveform = recState.durationMills > 0 || _state.value.isShowWaveform,
                         waveformState = pausedWaveformState.copy(
                             punchAnchorMs = _state.value.punchPointMs,
+                            takeActive = recState.isTakingPunch,
                         ),
                     )
                 } else if (recState.isRecording()) {
@@ -370,7 +371,11 @@ class HomeViewModel @Inject constructor(
                                 bottomBarState = BottomBarState.RECORDING,
                                 recordName = context.getString(R.string.recording_progress),
                                 keepScreenOn = prefs.isKeepScreenOn,
-                                punchPointMs = null,
+                                punchPointMs = if (recState.isTakingPunch) {
+                                    _state.value.punchPointMs
+                                } else {
+                                    null
+                                },
                             )
                         }
                         else -> {
@@ -396,6 +401,7 @@ class HomeViewModel @Inject constructor(
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
                                 punchAnchorMs = _state.value.punchPointMs,
+                                takeActive = recState.isTakingPunch,
                                 widthScale = recState.widthScale,
                             )
                         )
@@ -1279,6 +1285,7 @@ class HomeViewModel @Inject constructor(
             _state.value = _state.value.copy(punchPointMs = null)
             return
         }
+        if (svc.isPunchTakeActive()) return
         when (svc.punchIn(anchor)) {
             -2L -> {
                 _state.value = _state.value.copy(punchPointMs = null)
@@ -1397,6 +1404,7 @@ class HomeViewModel @Inject constructor(
         return try {
             val pcmLen = src.length() - 44
             val tmp = File(context.cacheDir, "audition-${System.currentTimeMillis()}.wav")
+            if (recordingService?.writePunchSnapshot(tmp) == true) return tmp
             FileOutputStream(tmp).use { out ->
                 out.write(
                     createWavHeader(
