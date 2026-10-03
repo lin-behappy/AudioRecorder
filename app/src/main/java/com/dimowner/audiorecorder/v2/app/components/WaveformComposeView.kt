@@ -95,12 +95,11 @@ fun WaveformComposeView(
         // view back to the head and the user can neither inspect nor re-anchor a punch take.
         // An audition is the exception: its standalone player drives progressMills, and the
         // waveform has to travel with it or the audition looks frozen.
-        // Follow the head only while the user has not taken hold of the waveform and no anchor
-        // has been picked. An anchored take keeps the view where the user left it: progressMills
-        // and durationMills then both grow, so riding the head would slide the window toward the
-        // (still distant) end of the take and leave the canvas half empty.
-        val followHead = ((state.isRecording && state.punchAnchorMs == null) ||
-            state.auditionPlaying) && !isUserDragging
+        // Follow the head while recording and while nothing holds the waveform in place, so the
+        // audio scrolls left as it is captured. A take has to keep following even though it sets
+        // an anchor: parking the view instead would freeze the audio while the "end of waveform"
+        // marker kept sliding right, since that marker is drawn at shift + durationPx.
+        val followHead = (state.isRecording || state.auditionPlaying) && !isUserDragging
         val shift = if (followHead) {
             updateShift(
                 durationPx, viewSize,
