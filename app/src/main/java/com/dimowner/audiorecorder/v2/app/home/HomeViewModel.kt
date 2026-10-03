@@ -86,6 +86,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
@@ -99,6 +101,7 @@ import javax.inject.Inject
 
 private const val ANIMATION_DURATION = 330L //mills.
 private const val RECORDING_PROGRESS_UPDATE_INTERVAL = 1000L //mills.
+private const val AUDITION_PROGRESS_INTERVAL_MS = 40L //mills.
 
 @SuppressWarnings("LongParameterList")
 @HiltViewModel
@@ -183,6 +186,8 @@ class HomeViewModel @Inject constructor(
     private var isRecordingServiceBound = false
 
     private var auditionPlayer: MediaPlayer? = null
+    private var auditionProgressJob: Job? = null
+    private val auditionPlayingNow: Boolean get() = auditionPlayer != null
     private var auditionFile: File? = null
 
     private val recordingServiceConnection = object : ServiceConnection {
@@ -395,7 +400,13 @@ class HomeViewModel @Inject constructor(
                                 waveformData = recState.amplitudes,
                                 durationSample = recState.totalSampleCount,
                                 durationMills = recState.durationMills,
-                                progressMills = recState.durationMills,
+                                // While an audition plays, the standalone MediaPlayer owns the
+                                // scrubber; writing the head here every tick pins it back.
+                                progressMills = if (auditionPlayingNow) {
+                                    _state.value.waveformState.progressMills
+                                } else {
+                                    recState.durationMills
+                                },
                                 gridStepMills = RECORDING_GRID_STEP,
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
@@ -1346,7 +1357,8 @@ class HomeViewModel @Inject constructor(
                     auditionFile = temp
                     auditionPlayer = player
                     player.start()
-                    _state.value = _state.value.copy(auditionPlaying = true)
+                    setAuditionPlaying(true)
+                    startAuditionProgress()
                 } catch (e: IOException) {
                     Timber.e(e, "audition start failed")
                     temp.delete()
@@ -1360,15 +1372,55 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * The audition player is standalone, so nothing else advances the waveform while it plays:
+     * without this poll the scrubber stays parked at the seek target for the whole audition.
+     */
+    private fun startAuditionProgress() {
+        auditionProgressJob?.cancel()
+        auditionProgressJob = viewModelScope.launch(mainDispatcher) {
+            while (isActive) {
+                val player = auditionPlayer ?: break
+                val pos = try {
+                    player.currentPosition.toLong()
+                } catch (e: IllegalStateException) {
+                    Timber.e(e, "audition progress failed")
+                    break
+                }
+                val dur = _state.value.waveformState.durationMills
+                if (pos >= 0 && dur > 0 && _state.value.waveformState.progressMills != pos) {
+                    _state.value = _state.value.copy(
+                        time = TimeUtils.formatTimeIntervalHourMinSec2(pos),
+                        progress = millsToProgress(pos, dur),
+                        waveformState = _state.value.waveformState.copy(
+                            progressMills = pos
+                        )
+                    )
+                }
+                delay(AUDITION_PROGRESS_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun auditionSeekTo(mills: Long) {
         try {
             auditionPlayer?.seekTo(mills.coerceAtLeast(0L).toInt())
         } catch (e: IllegalStateException) {
             Timber.e(e, "audition seek failed")
         }
+        val dur = _state.value.waveformState.durationMills
+        if (dur > 0) {
+            _state.value = _state.value.copy(
+                time = TimeUtils.formatTimeIntervalHourMinSec2(mills),
+                progress = millsToProgress(mills, dur),
+                waveformState = _state.value.waveformState.copy(progressMills = mills)
+            )
+        }
     }
 
     private fun releaseAudition() {
+        auditionProgressJob?.cancel()
+        auditionProgressJob = null
         try {
             auditionPlayer?.stop()
         } catch (e: IllegalStateException) {
@@ -1386,9 +1438,15 @@ class HomeViewModel @Inject constructor(
             Timber.e(e, "audition cleanup denied")
         }
         auditionFile = null
-        if (_state.value.auditionPlaying) {
-            _state.value = _state.value.copy(auditionPlaying = false)
-        }
+        setAuditionPlaying(false)
+    }
+
+    private fun setAuditionPlaying(playing: Boolean) {
+        if (_state.value.auditionPlaying == playing) return
+        _state.value = _state.value.copy(
+            auditionPlaying = playing,
+            waveformState = _state.value.waveformState.copy(auditionPlaying = playing),
+        )
     }
 
     private suspend fun buildAuditionCopy(): File? {
