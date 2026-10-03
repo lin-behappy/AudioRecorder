@@ -90,19 +90,13 @@ fun WaveformComposeView(
         // progress, follow the recording head. In every other case (idle, playing, anchored,
         // dragging) keep the current shift and only clamp it into the valid scroll range so
         // the view can never rest past the beginning or the end of the waveform.
-        // Follow the head only while the user has not taken hold of the waveform. Once an
-        // anchor is picked the view must stay where it was left, otherwise every tick drags the
-        // view back to the head and the user can neither inspect nor re-anchor a punch take.
-        // An audition follows too: its standalone player drives progressMills, so the waveform
-        // has to travel with it or the audition looks frozen.
-        // An anchor alone must not stop the recording scroll: the moment the user picks one, the view would
-        // freeze and "end of waveform" (drawn at shift + durationPx) would slide off to the right
-        // while durationPx keeps growing. A live take is the case that still follows, because the
-        // audio really is being captured. Only a chosen-but-not-yet-taken anchor parks the view,
-        // which is what lets the user inspect and re-pick that position.
-        val followHead =
-            ((state.isRecording && (state.punchAnchorMs == null || state.isTakingPunch)) ||
-                state.auditionPlaying) && !isUserDragging
+        // Follow the head only while the recorder is actually capturing and no anchor has been
+        // picked. isCapturing rather than isRecording, because a paused recorder still reports
+        // isRecording, and scrolling then fights every drag the user makes to inspect or re-pick
+        // a position -- the drag moves, the next tick snaps it back, and the gesture looks dead.
+        // An audition follows too, since its standalone player drives progressMills.
+        val followHead = ((state.isCapturing && state.punchAnchorMs == null) ||
+            state.auditionPlaying) && !isUserDragging
         val shift = if (followHead) {
             updateShift(
                 durationPx, viewSize,
@@ -564,6 +558,8 @@ data class WaveformState(
     val punchAnchorMs: Long? = null,
     val auditionPlaying: Boolean = false,
     val isTakingPunch: Boolean = false,
+    /** False while the recorder is paused: waveformState.isRecording stays true for a pause. */
+    val isCapturing: Boolean = true,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -580,6 +576,7 @@ data class WaveformState(
         if (punchAnchorMs != other.punchAnchorMs) return false
         if (auditionPlaying != other.auditionPlaying) return false
         if (isTakingPunch != other.isTakingPunch) return false
+        if (isCapturing != other.isCapturing) return false
 
         return true
     }
@@ -596,6 +593,7 @@ data class WaveformState(
         result = 31 * result + (punchAnchorMs?.hashCode() ?: 0)
         result = 31 * result + auditionPlaying.hashCode()
         result = 31 * result + isTakingPunch.hashCode()
+        result = 31 * result + isCapturing.hashCode()
         return result
     }
 }

@@ -332,6 +332,7 @@ class HomeViewModel @Inject constructor(
                         waveformState = pausedWaveformState.copy(
                             punchAnchorMs = _state.value.punchPointMs,
                             isTakingPunch = recState.isTakingPunch,
+                            isCapturing = false,
                         ),
                     )
                 } else if (recState.isRecording()) {
@@ -416,6 +417,7 @@ class HomeViewModel @Inject constructor(
                                 waveformDataOffset = recState.waveformDataOffset,
                                 punchAnchorMs = _state.value.punchPointMs,
                                 isTakingPunch = recState.isTakingPunch,
+                                isCapturing = true,
                                 widthScale = recState.widthScale,
                             )
                         )
