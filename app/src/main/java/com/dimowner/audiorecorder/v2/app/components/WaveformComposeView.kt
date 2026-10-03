@@ -95,8 +95,12 @@ fun WaveformComposeView(
         // view back to the head and the user can neither inspect nor re-anchor a punch take.
         // An audition is the exception: its standalone player drives progressMills, and the
         // waveform has to travel with it or the audition looks frozen.
-        val followHead = (state.isRecording && state.punchAnchorMs == null || state.auditionPlaying)
-            && !isUserDragging
+        // Follow the head only while the user has not taken hold of the waveform and no anchor
+        // has been picked. An anchored take keeps the view where the user left it: progressMills
+        // and durationMills then both grow, so riding the head would slide the window toward the
+        // (still distant) end of the take and leave the canvas half empty.
+        val followHead = ((state.isRecording && state.punchAnchorMs == null) ||
+            state.auditionPlaying) && !isUserDragging
         val shift = if (followHead) {
             updateShift(
                 durationPx, viewSize,
@@ -557,6 +561,7 @@ data class WaveformState(
     val waveformDataOffset: Int = 0,
     val punchAnchorMs: Long? = null,
     val auditionPlaying: Boolean = false,
+    val isTakingPunch: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -572,6 +577,7 @@ data class WaveformState(
         if (waveformDataOffset != other.waveformDataOffset) return false
         if (punchAnchorMs != other.punchAnchorMs) return false
         if (auditionPlaying != other.auditionPlaying) return false
+        if (isTakingPunch != other.isTakingPunch) return false
 
         return true
     }
@@ -587,6 +593,7 @@ data class WaveformState(
         result = 31 * result + waveformDataOffset.hashCode()
         result = 31 * result + (punchAnchorMs?.hashCode() ?: 0)
         result = 31 * result + auditionPlaying.hashCode()
+        result = 31 * result + isTakingPunch.hashCode()
         return result
     }
 }

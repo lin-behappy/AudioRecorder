@@ -457,7 +457,11 @@ internal fun HomeScreen(
     val bottomBar: @Composable () -> Unit = {
         val dur = uiState.waveformState.durationMills
         val anchor = uiState.punchPointMs
-        val rerecordLabel = if (anchor != null && dur > 0 && anchor < dur - 200) {
+        // While a punch take is capturing, the centre button is the ordinary pause control:
+        // it was labelled "re-record" for the whole take, so there was no way to pause.
+        val rerecordLabel = if (uiState.waveformState.isTakingPunch) {
+            stringResource(R.string.button_pause)
+        } else if (anchor != null && dur > 0 && anchor < dur - 200) {
             stringResource(R.string.button_rerecord)
         } else {
             stringResource(R.string.button_resume)

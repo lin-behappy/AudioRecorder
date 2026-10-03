@@ -331,6 +331,7 @@ class HomeViewModel @Inject constructor(
                         isShowWaveform = recState.durationMills > 0 || _state.value.isShowWaveform,
                         waveformState = pausedWaveformState.copy(
                             punchAnchorMs = _state.value.punchPointMs,
+                            isTakingPunch = recState.isTakingPunch,
                         ),
                     )
                 } else if (recState.isRecording()) {
@@ -380,6 +381,9 @@ class HomeViewModel @Inject constructor(
                                 } else {
                                     null
                                 },
+                                waveformState = _state.value.waveformState.copy(
+                                    isTakingPunch = recState.isTakingPunch,
+                                ),
                             )
                         }
                         else -> {
@@ -411,6 +415,7 @@ class HomeViewModel @Inject constructor(
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
                                 punchAnchorMs = _state.value.punchPointMs,
+                                isTakingPunch = recState.isTakingPunch,
                                 widthScale = recState.widthScale,
                             )
                         )
@@ -1282,6 +1287,11 @@ class HomeViewModel @Inject constructor(
         val svc = recordingService ?: return
         if (!_state.value.isRecording()) return
         releaseAudition()
+        // A live take makes this button the pause control, matching its label.
+        if (svc.isPunchTakeActive()) {
+            svc.pauseRecording()
+            return
+        }
         val dur = _state.value.waveformState.durationMills
         if (dur <= 0) return
         val anchor = _state.value.punchPointMs

@@ -180,6 +180,17 @@ class AudioRecordingService : Service() {
     private val recordingAmplitudeBufferSize: Int = calculateRecordingAmplitudeBufferSize()
 
     /**
+     * Extra window head-room used while a punch take is capturing. The base window covers only
+     * half a screen, which is fine when the view rides along with the recording head, but a take
+     * pins the view at the anchor so the user can re-anchor: the visible span then starts at the
+     * anchor and runs to the live head, which quickly outgrows the base window and leaves the
+     * right of the canvas blank. Sizing the window for the longest punch span keeps every
+     * visible column backed by real samples.
+     */
+    private val punchAmplitudeBufferSize: Int =
+        (PUNCH_MAX_MILLS * PUNCH_WINDOWS_PER_DURATION).toInt()
+
+    /**
      * Fixed-size sliding-window buffer of recording amplitudes, pre-filled with zeros.
      * When a new amplitude arrives it is appended at the end and the oldest value is removed
      * from the front, creating a moving-waveform effect.
@@ -498,9 +509,22 @@ class AudioRecordingService : Service() {
 
         // If the timer skipped ticks, fill the gap by repeating the current amplitude
         // so the waveform buffer stays aligned with the time-derived sample count.
+        // A take pins the view at its anchor, so the painted span runs anchor..head. The base
+        // window is half a screen and refills one sample per tick, so it can never cover that
+        // span: grow it to the span instead of letting the oldest samples evict the pre-anchor
+        // ones that the view is still showing.
+        val amplitudeLimit = if (_recordingState.value.isTakingPunch) {
+            maxOf(punchAmplitudeBufferSize, newSampleCount)
+        } else {
+            recordingAmplitudeBufferSize
+        }
+
         repeat(samplesToAdd) {
             recordingAmplitudes.addLast(scaledAmplitude)
-            if (recordingAmplitudes.size > recordingAmplitudeBufferSize) {
+            // While a take is live the view is pinned at its anchor, so evicting the oldest
+            // samples would scroll the painted span off to the left and leave the canvas blank.
+            // Growing the window instead keeps anchor..head fully backed by real samples.
+            if (recordingAmplitudes.size > amplitudeLimit && !_recordingState.value.isTakingPunch) {
                 recordingAmplitudes.removeFirst()
             }
 
@@ -517,6 +541,8 @@ class AudioRecordingService : Service() {
         val amps = recordingAmplitudes.toIntArray()
         val waveformDataOffset =
             (totalRecordingSampleCount - amps.size).coerceAtLeast(0)
+        Timber.d("punchDbg taking=%b newSamples=%d amps=%d offset=%d",
+            _recordingState.value.isTakingPunch, newSampleCount, amps.size, waveformDataOffset)
         val widthScale =
             durationMills * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD)
 
@@ -902,9 +928,10 @@ class AudioRecordingService : Service() {
             amplitudes = amps,
             totalSampleCount = anchorSamples,
             waveformDataOffset = (anchorSamples - amps.size).coerceAtLeast(0),
-            widthScale = anchor * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD),
             isTakingPunch = true,
         )
+        Timber.d("punchDbg after punchIn taking=%b dur=%d",
+            _recordingState.value.isTakingPunch, _recordingState.value.durationMills)
         updateNotification()
         return anchor
     }
@@ -933,7 +960,6 @@ class AudioRecordingService : Service() {
             durationMills = spliced,
             totalSampleCount = keep,
             waveformDataOffset = (keep - recordingAmplitudes.size).coerceAtLeast(0),
-            widthScale = spliced * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD),
         )
         return anchorMs < spliced
     }
@@ -1386,6 +1412,12 @@ enum class RecordingState {
  *   pxPerSample = pxPerMill × RECORDING_VISUALIZATION_INTERVAL_NEW
  *   bufferSize  = (screenWidth / 2) / pxPerSample
  */
+/** Longest punch take the amplitude window is sized for (2 minutes), in milliseconds. */
+private const val PUNCH_MAX_MILLS = 120_000L
+
+/** Slack so the window still covers the span after new samples displace the oldest ones. */
+private const val PUNCH_WINDOWS_PER_DURATION = 2
+
 private fun calculateRecordingAmplitudeBufferSize(): Int {
     val screenWidthPx = Resources.getSystem().displayMetrics.widthPixels
     val pxPerMill = screenWidthPx * AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD
