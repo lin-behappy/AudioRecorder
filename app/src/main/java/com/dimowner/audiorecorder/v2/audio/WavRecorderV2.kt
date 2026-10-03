@@ -617,11 +617,14 @@ class WavRecorderV2 @Inject constructor(
         val bps = bytesPerSecond
         val frame = currentFrameSize
         if (bps <= 0 || frame <= 0) return false
-        val (takeFile, takeLen, anchorMs) = synchronized(ioLock) {
+        val (takeFile, reportedLen, anchorMs) = synchronized(ioLock) {
             val f = currentTakeFile
             if (!taking || f == null) return false
             Triple(f, takeBytesWritten, takeAnchorMs)
         }
+        // The take is still being appended to, so the byte counter can lead the bytes actually
+        // on disk. Clamp, otherwise the copy below throws and audition silently produces nothing.
+        val takeLen = reportedLen.coerceAtMost((takeFile.length() - 44).coerceAtLeast(0L))
         val ranges = computePunchRanges(mainFile, anchorMs, takeLen, bps, frame)
         FileOutputStream(dest).use { out ->
             writePunchBody(out, mainFile, takeFile, takeLen, ranges)

@@ -874,15 +874,17 @@ class AudioRecordingService : Service() {
         if (!st.isRecording()) return -1L
         if (st.recordingFormat != RecordingFormat.Wav) return -2L
         val rec = audioRecorder
-        if (rec !is WavRecorderV2 || rec.isTaking()) return -1L
-        val dur = st.durationMills
+        if (rec !is WavRecorderV2) return -1L
+        // Re-punching while a take is live keeps what was already recorded over the old anchor
+        // (splice it down) and restarts the take from the new one, instead of refusing the click.
+        if (rec.isTaking() && !repunchOverTake(rec, anchorMs)) return -1L
+        val dur = _recordingState.value.durationMills
         if (dur <= 0) return -1L
         val anchor = anchorMs.coerceIn(0L, dur)
         if (!st.isPaused()) {
             rec.pauseRecording()
         }
-        val takeFile = File(cacheDir, "punch-take-${System.currentTimeMillis()}.wav")
-        if (!rec.startTake(takeFile, anchor)) return -1L
+        if (!punchStartTake(rec, anchor)) return -1L
         val interval = AppConstants.RECORDING_VISUALIZATION_INTERVAL_NEW.toLong()
         val anchorSamples = (anchor / interval).toInt()
         val drop = totalRecordingSampleCount - anchorSamples
@@ -906,6 +908,38 @@ class AudioRecordingService : Service() {
 
     fun isPunchTakeActive(): Boolean {
         return (audioRecorder as? WavRecorderV2)?.isTaking() == true
+    }
+
+    private fun repunchOverTake(rec: WavRecorderV2, anchorMs: Long): Boolean {
+        val spliced = rec.stopTakeAndSplice()
+        Timber.d("punch repunch splice=%d newAnchor=%d", spliced, anchorMs)
+        if (spliced <= 0) {
+            rec.abortTake()
+            return false
+        }
+        val interval = AppConstants.RECORDING_VISUALIZATION_INTERVAL_NEW.toLong()
+        val anchorSamples = (spliced / interval).toInt()
+        val keep = anchorSamples.coerceAtMost(totalRecordingSampleCount)
+        val drop = totalRecordingSampleCount - keep
+        if (drop > 0) {
+            repeat(drop) { if (recordingAmplitudes.isNotEmpty()) recordingAmplitudes.removeLast() }
+        }
+        totalRecordingSampleCount = keep
+        recordingFullDataBuffer.truncateToSamples(keep)
+        _recordingState.value = _recordingState.value.copy(
+            durationMills = spliced,
+            totalSampleCount = keep,
+            waveformDataOffset = (keep - recordingAmplitudes.size).coerceAtLeast(0),
+            widthScale = spliced * (AppConstantsV2.DEFAULT_WIDTH_SCALE / AppConstantsV2.SHORT_RECORD),
+        )
+        return anchorMs < spliced
+    }
+
+    private fun punchStartTake(rec: WavRecorderV2, anchor: Long): Boolean {
+        val takeFile = File(cacheDir, "punch-take-${System.currentTimeMillis()}.wav")
+        val ok = rec.startTake(takeFile, anchor)
+        Timber.d("punch startTake ok=%b anchor=%d", ok, anchor)
+        return ok
     }
 
     /**

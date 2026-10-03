@@ -326,7 +326,6 @@ class HomeViewModel @Inject constructor(
                         isShowWaveform = recState.durationMills > 0 || _state.value.isShowWaveform,
                         waveformState = pausedWaveformState.copy(
                             punchAnchorMs = _state.value.punchPointMs,
-                            takeActive = recState.isTakingPunch,
                         ),
                     )
                 } else if (recState.isRecording()) {
@@ -401,7 +400,6 @@ class HomeViewModel @Inject constructor(
                                 isRecording = true,
                                 waveformDataOffset = recState.waveformDataOffset,
                                 punchAnchorMs = _state.value.punchPointMs,
-                                takeActive = recState.isTakingPunch,
                                 widthScale = recState.widthScale,
                             )
                         )
@@ -1285,7 +1283,6 @@ class HomeViewModel @Inject constructor(
             _state.value = _state.value.copy(punchPointMs = null)
             return
         }
-        if (svc.isPunchTakeActive()) return
         when (svc.punchIn(anchor)) {
             -2L -> {
                 _state.value = _state.value.copy(punchPointMs = null)
@@ -1326,8 +1323,8 @@ class HomeViewModel @Inject constructor(
         if (_state.value.bottomBarState == BottomBarState.RECORDING) {
             svc.pauseRecording()
         }
-        val anchor = _state.value.punchPointMs
-            ?: _state.value.waveformState.durationMills
+        val dur = _state.value.waveformState.durationMills
+        val anchor = (_state.value.punchPointMs ?: dur).coerceIn(0L, dur.coerceAtLeast(0L))
         viewModelScope.launch(ioDispatcher) {
             val temp = buildAuditionCopy()
             withContext(mainDispatcher) {
@@ -1404,7 +1401,11 @@ class HomeViewModel @Inject constructor(
         return try {
             val pcmLen = src.length() - 44
             val tmp = File(context.cacheDir, "audition-${System.currentTimeMillis()}.wav")
-            if (recordingService?.writePunchSnapshot(tmp) == true) return tmp
+            if (recordingService?.writePunchSnapshot(tmp) == true) {
+                Timber.d("audition punch snapshot bytes=%d", tmp.length())
+                return tmp
+            }
+            Timber.d("audition plain copy bytes=%d", src.length())
             FileOutputStream(tmp).use { out ->
                 out.write(
                     createWavHeader(
