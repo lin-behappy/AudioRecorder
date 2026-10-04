@@ -70,13 +70,6 @@ fun WaveformComposeView(
     }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var isUserDragging by remember { mutableStateOf(false) }
-    var hasDraggedWaveform by remember { mutableStateOf(false) }
-    // Resuming capture or starting an audition hands the scroll position back to the head;
-    // until one of those happens a finished drag owns it, so the next progress tick cannot
-    // discard the offset the user just made.
-    LaunchedEffect(state.isCapturing, state.auditionPlaying) {
-        if (state.isCapturing || state.auditionPlaying) hasDraggedWaveform = false
-    }
     val isRecordingNow by rememberUpdatedState(state.isRecording)
     val currentOnSeekStart by rememberUpdatedState(onSeekStart)
     val currentOnSeekProgress by rememberUpdatedState(onSeekProgress)
@@ -93,13 +86,11 @@ fun WaveformComposeView(
         val pxPerSample = if (state.durationSample > 0) durationPx / state.durationSample else 0f
         val samplePerPx = if (durationPx > 0) state.durationSample / durationPx else 0f
         if (!pxPerMill.isFinite() || pxPerMill <= 0f || !millsPerPx.isFinite()) return@LaunchedEffect
-        // isCapturing, not isRecording: a paused recorder still reports isRecording, and scrolling
-        // then fights every drag the user makes to re-pick a position. An anchor alone must not stop
-        // the scroll either -- re-recording punches a take in at that very anchor, so while
-        // isTakingPunch the head genuinely advances. Only a chosen-but-not-yet-taken anchor parks.
-        val followHead = (state.isCapturing &&
-            (state.punchAnchorMs == null || state.isTakingPunch) ||
-            state.auditionPlaying) && !isUserDragging && !hasDraggedWaveform
+        // isCapturing, not isRecording: a paused recorder still reports isRecording, which would
+        // snap a paused-time drag back to the head. No anchor term here -- the head must advance
+        // while the recording runs, or view and audio drift apart as soon as an anchor exists.
+        val followHead = ((state.isCapturing) ||
+            state.auditionPlaying) && !isUserDragging
         val shift = if (followHead) {
             updateShift(
                 durationPx, viewSize,
@@ -217,7 +208,6 @@ fun WaveformComposeView(
                         )
                     },
                     onDragEnd = {
-                        hasDraggedWaveform = true
                         val shift = viewState.value.waveformShiftPx.toInt()
                         val half = size.width / 2
                         currentOnSeekEnd(
